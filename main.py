@@ -12,10 +12,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Tomasz Trading Journal")
-print("LOADED MAIN.PY FROM:", __file__, flush=True)
 
-for route in app.routes:
-    print("ROUTE AT START:", getattr(route, "path", "?"), flush=True)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -526,4 +523,3 @@ async function deleteCurrent(){
 </body>
 </html>
 """
-print("FINAL ROUTES:", [getattr(r, "path", "?") for r in app.routes], flush=True)
