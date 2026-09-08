@@ -446,11 +446,25 @@ JOURNAL_HTML = r"""
 .daily{padding:0 18px 14px}.day-list{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.day{background:#0d141b;border:1px solid #202c38;border-radius:9px;padding:8px;min-height:64px}.day .d{font-size:10px;color:var(--muted)}.day .p{font-weight:800;margin-top:5px}.day .t{font-size:10px;color:var(--muted);margin-top:4px}
 .feed{padding:0 18px 80px}.card{background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden;margin-bottom:15px}.card-head{padding:13px 15px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line)}
 .symbol{font-size:18px;font-weight:850}.badge{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#202a34;color:#cad4dd}.badge.long{background:rgba(72,220,138,.12);color:var(--green)}.badge.short{background:rgba(255,112,112,.12);color:var(--red)}
-.pnl{margin-left:auto;font-weight:850}.pos{color:var(--green)}.neg{color:var(--red)}.card-body{display:grid;grid-template-columns:minmax(280px,440px) 1fr;gap:16px;padding:15px}.shot{width:100%;aspect-ratio:16/9;object-fit:cover;background:#0d1218;border:1px solid var(--line);border-radius:11px}
+.pnl{margin-left:auto;font-weight:850}.pos{color:var(--green)}.neg{color:var(--red)}.card-body{display:grid;grid-template-columns:minmax(280px,440px) 1fr;gap:16px;padding:15px}.shot{width:100%;aspect-ratio:16/9;object-fit:cover;background:#0d1218;border:1px solid var(--line);border-radius:11px;cursor:zoom-in}
 .meta{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}.meta span{font-size:11px;color:#bec8d1;background:#19212a;border:1px solid var(--line);border-radius:999px;padding:4px 7px}.note{white-space:pre-wrap;line-height:1.5}.lesson{margin-top:13px;padding-top:11px;border-top:1px solid var(--line)}.empty{text-align:center;color:var(--muted);padding:90px 15px}
 dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radius:15px;background:#0f151c;color:var(--text)}dialog::backdrop{background:rgba(0,0,0,.68)}.modal-head,.modal-foot{padding:14px 16px;display:flex;align-items:center;border-bottom:1px solid var(--line)}.modal-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end;gap:8px}
 .quick-grid{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:11px}.full{grid-column:1/-1}label{display:block;font-size:10px;color:var(--muted);font-weight:750;margin-bottom:5px}textarea{min-height:95px;resize:vertical}
 .details{grid-column:1/-1;border:1px solid var(--line);border-radius:11px;background:#0c131a}.details summary{cursor:pointer;padding:11px 12px;font-size:12px;font-weight:800;color:#c8d3dd}.details .form-grid{padding:0 12px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px}.preview{max-width:100%;max-height:250px;border-radius:10px;border:1px solid var(--line);display:none}
+.lightbox{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.94);overflow:hidden;user-select:none;-webkit-user-select:none}
+.lightbox.show{display:block}
+.lightbox-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none;cursor:grab}
+.lightbox-stage.dragging{cursor:grabbing}
+.lightbox-image{max-width:94vw;max-height:90vh;width:auto;height:auto;object-fit:contain;transform-origin:center center;will-change:transform;touch-action:none;pointer-events:auto;-webkit-user-drag:none;user-select:none}
+.lightbox-toolbar{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;align-items:center;gap:7px;padding:7px;background:rgba(14,20,27,.92);border:1px solid #2a3744;border-radius:13px;box-shadow:0 12px 40px rgba(0,0,0,.45);backdrop-filter:blur(10px)}
+.lightbox-tool{min-width:42px;height:40px;border:1px solid #334252;background:#17212b;color:#edf3f8;border-radius:9px;font-weight:850;font-size:18px}
+.lightbox-tool:hover{background:#22303d}
+.lightbox-reset{font-size:12px;padding:0 12px;width:auto}
+.lightbox-zoom{min-width:62px;text-align:center;color:#b8c4cf;font-size:12px;font-weight:750}
+.lightbox-close{position:absolute;right:18px;top:18px;width:46px;height:46px;border:1px solid #334252;background:rgba(14,20,27,.9);color:white;border-radius:50%;font-size:28px;line-height:1}
+.lightbox-hint{position:absolute;left:18px;top:20px;color:#97a5b2;font-size:11px;background:rgba(14,20,27,.72);padding:7px 9px;border-radius:8px;pointer-events:none}
+@media(max-width:700px){.lightbox-toolbar{bottom:12px}.lightbox-close{right:12px;top:12px}.lightbox-hint{display:none}.lightbox-image{max-width:98vw;max-height:88vh}}
+
 @media(max-width:900px){.filters{grid-template-columns:1fr 1fr 1fr}.filters input{grid-column:1/-1}.analytics{grid-template-columns:1fr}.breakdown{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:700px){.header-row{padding:12px}.brand{font-size:19px}.tabs{padding:0 12px 10px}.filters{padding:10px 12px;grid-template-columns:1fr 1fr}.stats{padding:12px;grid-template-columns:1fr 1fr}.analytics,.breakdown,.daily,.feed{padding-left:12px;padding-right:12px}.card-body{grid-template-columns:1fr}.quick-grid{grid-template-columns:1fr}.full{grid-column:auto}.details{grid-column:auto}.details .form-grid{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(3,1fr)}}
 </style>
@@ -514,16 +528,214 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
  <div class="modal-foot"><button class="btn" id="deleteBtn" style="display:none;background:#36171a;color:#ffb0b0" onclick="deleteCurrent()">Usuń</button><button class="btn" onclick="dlg.close()">Anuluj</button><button class="btn primary" onclick="saveTrade()">Zapisz trade</button></div>
 </dialog>
 
+<div id="lightbox" class="lightbox" aria-hidden="true">
+ <div id="lightboxStage" class="lightbox-stage">
+  <img id="lightboxImage" class="lightbox-image" src="" alt="Powiększony screenshot trejdu" draggable="false">
+ </div>
+
+ <div class="lightbox-hint">Kółko myszy = zoom · przeciągnij = przesuwanie · ESC = zamknij</div>
+
+ <button class="lightbox-close" type="button" onclick="closeLightbox()" aria-label="Zamknij">×</button>
+
+ <div class="lightbox-toolbar" onclick="event.stopPropagation()">
+  <button class="lightbox-tool" type="button" onclick="zoomOut()" title="Pomniejsz">−</button>
+  <span id="lightboxZoom" class="lightbox-zoom">100%</span>
+  <button class="lightbox-tool" type="button" onclick="zoomIn()" title="Powiększ">+</button>
+  <button class="lightbox-tool lightbox-reset" type="button" onclick="resetLightbox()" title="Reset">Reset</button>
+ </div>
+</div>
+
 <script>
 const key=__SAFE_KEY__,dlg=document.getElementById('dlg');let editingId=null,currentPeriod='today';
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const money=v=>{const n=Number(v)||0;return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
 function nowLocal(){const d=new Date(),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}function isoFromLocal(v){return v?new Date(v).toISOString():new Date().toISOString()}function localInputFromIso(v){if(!v)return nowLocal();const d=new Date(v),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}
+
+/* =========================================================
+   ADVANCED SCREENSHOT VIEWER
+   - fullscreen
+   - wheel zoom
+   - +/- buttons
+   - reset
+   - mouse drag
+   - pinch-to-zoom + touch pan
+   - double click zoom
+   - ESC / background click closes
+   ========================================================= */
+
+const lightbox=$('lightbox');
+const lightboxStage=$('lightboxStage');
+const lightboxImage=$('lightboxImage');
+const lightboxZoom=$('lightboxZoom');
+
+let lbScale=1;
+let lbX=0;
+let lbY=0;
+let lbPointers=new Map();
+let lbLastDistance=null;
+let lbLastMidpoint=null;
+let lbDragLast=null;
+
+function clamp(v,min,max){return Math.min(max,Math.max(min,v))}
+
+function applyLightboxTransform(){
+ lightboxImage.style.transform=`translate(${lbX}px,${lbY}px) scale(${lbScale})`;
+ lightboxZoom.textContent=Math.round(lbScale*100)+'%';
+ lightboxStage.classList.toggle('dragging',lbPointers.size>0&&lbScale>1);
+}
+
+function setLightboxScale(next){
+ lbScale=clamp(next,1,8);
+ if(lbScale===1){lbX=0;lbY=0}
+ applyLightboxTransform();
+}
+
+function openLightbox(src){
+ if(!src)return;
+ lightboxImage.src=src;
+ lbScale=1;lbX=0;lbY=0;
+ lbPointers.clear();lbLastDistance=null;lbLastMidpoint=null;lbDragLast=null;
+ applyLightboxTransform();
+ lightbox.classList.add('show');
+ lightbox.setAttribute('aria-hidden','false');
+ document.body.style.overflow='hidden';
+}
+
+function closeLightbox(){
+ lightbox.classList.remove('show');
+ lightbox.setAttribute('aria-hidden','true');
+ lightboxImage.src='';
+ document.body.style.overflow='';
+ lbPointers.clear();lbLastDistance=null;lbLastMidpoint=null;lbDragLast=null;
+ lbScale=1;lbX=0;lbY=0;
+ applyLightboxTransform();
+}
+
+function resetLightbox(){
+ lbScale=1;lbX=0;lbY=0;
+ applyLightboxTransform();
+}
+
+function zoomIn(){setLightboxScale(lbScale*1.25)}
+function zoomOut(){setLightboxScale(lbScale/1.25)}
+
+function midpoint(a,b){return{x:(a.x+b.x)/2,y:(a.y+b.y)/2}}
+function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+
+lightbox.addEventListener('click',e=>{
+ if(e.target===lightbox)closeLightbox();
+});
+
+lightboxStage.addEventListener('click',e=>{
+ if(e.target===lightboxStage)closeLightbox();
+});
+
+lightboxStage.addEventListener('wheel',e=>{
+ if(!lightbox.classList.contains('show'))return;
+ e.preventDefault();
+ const factor=e.deltaY<0?1.16:1/1.16;
+ setLightboxScale(lbScale*factor);
+},{passive:false});
+
+lightboxImage.addEventListener('dblclick',e=>{
+ e.preventDefault();
+ if(lbScale>1.05)resetLightbox();
+ else setLightboxScale(2.5);
+});
+
+lightboxStage.addEventListener('pointerdown',e=>{
+ if(!lightbox.classList.contains('show'))return;
+ if(e.pointerType==='mouse'&&e.button!==0)return;
+ lightboxStage.setPointerCapture?.(e.pointerId);
+ lbPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+
+ if(lbPointers.size===1){
+  lbDragLast={x:e.clientX,y:e.clientY};
+  lbLastDistance=null;
+  lbLastMidpoint=null;
+ }else if(lbPointers.size===2){
+  const pts=[...lbPointers.values()];
+  lbLastDistance=distance(pts[0],pts[1]);
+  lbLastMidpoint=midpoint(pts[0],pts[1]);
+  lbDragLast=null;
+ }
+ applyLightboxTransform();
+});
+
+lightboxStage.addEventListener('pointermove',e=>{
+ if(!lbPointers.has(e.pointerId))return;
+ e.preventDefault();
+ lbPointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+
+ if(lbPointers.size===1){
+  if(lbScale<=1)return;
+  const p=[...lbPointers.values()][0];
+  if(lbDragLast){
+   lbX+=p.x-lbDragLast.x;
+   lbY+=p.y-lbDragLast.y;
+  }
+  lbDragLast={x:p.x,y:p.y};
+  applyLightboxTransform();
+  return;
+ }
+
+ if(lbPointers.size>=2){
+  const pts=[...lbPointers.values()].slice(0,2);
+  const d=distance(pts[0],pts[1]);
+  const mid=midpoint(pts[0],pts[1]);
+
+  if(lbLastDistance&&lbLastDistance>0){
+   const oldScale=lbScale;
+   const nextScale=clamp(lbScale*(d/lbLastDistance),1,8);
+
+   if(lbLastMidpoint){
+    lbX+=mid.x-lbLastMidpoint.x;
+    lbY+=mid.y-lbLastMidpoint.y;
+   }
+
+   lbScale=nextScale;
+   if(lbScale===1){lbX=0;lbY=0}
+   if(oldScale!==lbScale)applyLightboxTransform();
+   else applyLightboxTransform();
+  }
+
+  lbLastDistance=d;
+  lbLastMidpoint=mid;
+ }
+});
+
+function endLightboxPointer(e){
+ if(lbPointers.has(e.pointerId))lbPointers.delete(e.pointerId);
+
+ if(lbPointers.size===0){
+  lbDragLast=null;
+  lbLastDistance=null;
+  lbLastMidpoint=null;
+ }else if(lbPointers.size===1){
+  const p=[...lbPointers.values()][0];
+  lbDragLast={x:p.x,y:p.y};
+  lbLastDistance=null;
+  lbLastMidpoint=null;
+ }
+ applyLightboxTransform();
+}
+
+lightboxStage.addEventListener('pointerup',endLightboxPointer);
+lightboxStage.addEventListener('pointercancel',endLightboxPointer);
+lightboxStage.addEventListener('lostpointercapture',endLightboxPointer);
+
+document.addEventListener('keydown',e=>{
+ if(e.key==='Escape'&&lightbox.classList.contains('show'))closeLightbox();
+ if(!lightbox.classList.contains('show'))return;
+ if(e.key==='+'||e.key==='=')zoomIn();
+ if(e.key==='-')zoomOut();
+ if(e.key==='0')resetLightbox();
+});
 async function loadOptions(){const r=await fetch(`/api/options/${encodeURIComponent(key)}`,{cache:'no-store'}),d=await r.json();const set=(id,first,vals)=>{const s=$(id),cur=s.value;s.innerHTML=`<option value="">${first}</option>`+vals.map(x=>`<option>${esc(x)}</option>`).join('');s.value=cur};set('instrumentFilter','Wszystkie instrumenty',d.instruments);set('setupFilter','Wszystkie setupy',d.setups);set('tagFilter','Wszystkie tagi',d.tags);$('setupList').innerHTML=d.setups.map(x=>`<option>${esc(x)}</option>`).join('')}
 function drawEquity(points){const c=$('equityCanvas'),box=c.getBoundingClientRect(),dpr=window.devicePixelRatio||1;c.width=Math.max(300,box.width*dpr);c.height=Math.max(160,box.height*dpr);const x=c.getContext('2d');x.scale(dpr,dpr);const w=box.width,h=box.height;x.clearRect(0,0,w,h);x.strokeStyle='#26323d';for(let i=1;i<4;i++){const y=h*i/4;x.beginPath();x.moveTo(0,y);x.lineTo(w,y);x.stroke()}if(!points.length){x.fillStyle='#82909d';x.font='12px system-ui';x.fillText('Brak danych',12,24);return}const vals=points.map(p=>Number(p.value)||0),min=Math.min(0,...vals),max=Math.max(0,...vals),span=(max-min)||1,xy=(v,i)=>[points.length===1?w/2:i/(points.length-1)*w,h-((v-min)/span)*(h-20)-10];x.strokeStyle='#6aa7ff';x.lineWidth=2;x.beginPath();vals.forEach((v,i)=>{const[a,b]=xy(v,i);i?x.lineTo(a,b):x.moveTo(a,b)});x.stroke();const last=vals.at(-1),[lx,ly]=xy(last,vals.length-1);x.fillStyle=last>=0?'#48dc8a':'#ff7070';x.beginPath();x.arc(lx,ly,4,0,Math.PI*2);x.fill()}
 function renderRows(id,rows){$(id).innerHTML=(rows||[]).slice(0,6).map(r=>`<div class="row"><div class="name">${esc(r.name)}</div><div class="${r.pnl>0?'pos':r.pnl<0?'neg':''}">${money(r.pnl)}</div><div class="wr">${Math.round(r.win_rate)}%</div></div>`).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>'}
 async function loadAnalytics(){const r=await fetch(`/api/analytics/${encodeURIComponent(key)}?period=${currentPeriod}`,{cache:'no-store'}),d=await r.json(),s=d.summary;$('sTrades').textContent=s.trades;$('sPnl').textContent=money(s.total_pnl).replace('+','');$('sPnl').className='v '+(s.total_pnl>0?'pos':s.total_pnl<0?'neg':'');$('sWin').textContent=Math.round(s.win_rate)+'%';$('sAvg').textContent=money(s.avg_trade).replace('+','');$('miniWins').textContent=s.wins;$('miniLosses').textContent=s.losses;$('miniRating').textContent=s.avg_rating==null?'—':s.avg_rating.toFixed(1)+'/5';$('miniBest').textContent=d.by_setup?.[0]?.name||'—';renderRows('setupRows',d.by_setup);renderRows('instrumentRows',d.by_instrument);renderRows('sideRows',d.by_side);$('dayList').innerHTML=(d.daily||[]).slice(0,21).map(v=>`<div class="day"><div class="d">${esc(v.date)}</div><div class="p ${v.pnl>0?'pos':v.pnl<0?'neg':''}">${money(v.pnl)}</div><div class="t">${v.trades} trades</div></div>`).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>';drawEquity(d.equity||[])}
-async function loadFeed(){const p=new URLSearchParams({period:currentPeriod});if($('search').value)p.set('q',$('search').value);if($('instrumentFilter').value)p.set('instrument',$('instrumentFilter').value);if($('sideFilter').value)p.set('side',$('sideFilter').value);if($('setupFilter').value)p.set('setup',$('setupFilter').value);if($('tagFilter').value)p.set('tag',$('tagFilter').value);const r=await fetch(`/api/trades/${encodeURIComponent(key)}?${p}`,{cache:'no-store'}),d=await r.json();if(!d.items.length){$('feed').innerHTML='<div class="empty">Brak trejdów w tym widoku.</div>';return}$('feed').innerHTML=d.items.map(t=>{const pnl=Number(t.pnl)||0,date=new Date(t.trade_time).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'});return`<article class="card"><div class="card-head"><div class="symbol">${esc(t.instrument)}</div><span class="badge ${t.side==='LONG'?'long':'short'}">${esc(t.side)}</span>${t.setup?`<span class="badge">${esc(t.setup)}</span>`:''}<div class="pnl ${pnl>0?'pos':pnl<0?'neg':''}">${money(pnl)}</div></div><div class="card-body"><div>${t.screenshot_url?`<img class="shot" src="${t.screenshot_url}" loading="lazy">`:`<div class="shot" style="display:grid;place-items:center;color:var(--muted)">Brak screenshotu</div>`}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${t.entry!=null?`<span>Entry ${esc(t.entry)}</span>`:''}${t.exit!=null?`<span>Exit ${esc(t.exit)}</span>`:''}${t.qty!=null?`<span>Qty ${esc(t.qty)}</span>`:''}${t.rating?`<span>${'★'.repeat(Number(t.rating))}</span>`:''}${t.tags?`<span>${esc(t.tags)}</span>`:''}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`}).join('')}
+async function loadFeed(){const p=new URLSearchParams({period:currentPeriod});if($('search').value)p.set('q',$('search').value);if($('instrumentFilter').value)p.set('instrument',$('instrumentFilter').value);if($('sideFilter').value)p.set('side',$('sideFilter').value);if($('setupFilter').value)p.set('setup',$('setupFilter').value);if($('tagFilter').value)p.set('tag',$('tagFilter').value);const r=await fetch(`/api/trades/${encodeURIComponent(key)}?${p}`,{cache:'no-store'}),d=await r.json();if(!d.items.length){$('feed').innerHTML='<div class="empty">Brak trejdów w tym widoku.</div>';return}$('feed').innerHTML=d.items.map(t=>{const pnl=Number(t.pnl)||0,date=new Date(t.trade_time).toLocaleString('pl-PL',{dateStyle:'medium',timeStyle:'short'});return`<article class="card"><div class="card-head"><div class="symbol">${esc(t.instrument)}</div><span class="badge ${t.side==='LONG'?'long':'short'}">${esc(t.side)}</span>${t.setup?`<span class="badge">${esc(t.setup)}</span>`:''}<div class="pnl ${pnl>0?'pos':pnl<0?'neg':''}">${money(pnl)}</div></div><div class="card-body"><div>${t.screenshot_url?`<img class="shot" src="${t.screenshot_url}" loading="lazy" onclick="openLightbox(this.src)" title="Kliknij, aby powiększyć">`:`<div class="shot" style="display:grid;place-items:center;color:var(--muted)">Brak screenshotu</div>`}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${t.entry!=null?`<span>Entry ${esc(t.entry)}</span>`:''}${t.exit!=null?`<span>Exit ${esc(t.exit)}</span>`:''}${t.qty!=null?`<span>Qty ${esc(t.qty)}</span>`:''}${t.rating?`<span>${'★'.repeat(Number(t.rating))}</span>`:''}${t.tags?`<span>${esc(t.tags)}</span>`:''}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`}).join('')}
 async function refresh(){await Promise.all([loadAnalytics(),loadFeed()])}
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',async()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');currentPeriod=b.dataset.period;await refresh()}))
 function openNew(){editingId=null;$('instrument').value='MNQ';$('side').value='LONG';$('pnl').value='';$('setup').value='';$('notes').value='';['entry','exit','qty','rating','tags','lesson'].forEach(id=>$(id).value='');$('trade_time').value=nowLocal();$('screenshot').value='';$('preview').style.display='none';$('preview').src='';$('deleteBtn').style.display='none';$('dlgTitle').textContent='Dodaj trade';dlg.showModal()}
