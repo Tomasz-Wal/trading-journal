@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Que
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Tomasz Trading Journal v2.6")
+app = FastAPI(title="Tomasz Trading Journal v2.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,7 +57,7 @@ async def sb_request(method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "app": "Tomasz Trading Journal v2.6", "open": "/journal/YOUR_JOURNAL_KEY"}
+    return {"ok": True, "app": "Tomasz Trading Journal v2.7", "open": "/journal/YOUR_JOURNAL_KEY"}
 
 @app.get("/health")
 def health():
@@ -101,6 +101,36 @@ def _csv_bool(value: str, default: bool = True) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+def _optional_float(value):
+    raw = str(value or "").strip().replace(",", ".")
+    return float(raw) if raw else None
+
+def calc_result_points(side, entry, exit_price, explicit=None):
+    """Manual result_points wins; otherwise derive signed points from Entry/Exit."""
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+    if entry is None or exit_price is None:
+        return None
+    try:
+        e = float(entry)
+        x = float(exit_price)
+    except (TypeError, ValueError):
+        return None
+    return (x - e) if str(side or "").upper() == "LONG" else (e - x)
+
+def calc_r(result_points, risk_points):
+    try:
+        pts = float(result_points)
+        risk = float(risk_points)
+    except (TypeError, ValueError):
+        return None
+    if risk <= 0:
+        return None
+    return pts / risk
 
 def _parse_money(value: str) -> float:
     raw = str(value or "").strip()
@@ -193,6 +223,8 @@ def _parse_performance_csv(data: bytes, normalize_symbol: bool) -> tuple[list[di
                 "exit": exit_price,
                 "qty": qty,
                 "pnl": net_pnl,
+                "result_points": round((exit_price - entry) if side == "LONG" else (entry - exit_price), 8),
+                "risk_points": None,
                 "source_buy_fill_id": str(row.get("buyFillId") or "").strip(),
                 "source_sell_fill_id": str(row.get("sellFillId") or "").strip(),
             })
@@ -374,6 +406,8 @@ async def import_csv(
             "exit": t["exit"],
             "qty": t["qty"],
             "pnl": t["pnl"],
+            "result_points": t.get("result_points"),
+            "risk_points": None,
             "rating": None,
             "tags": "CSV import",
             "notes": "",
@@ -412,47 +446,90 @@ async def analytics(
         "GET",
         "/rest/v1/trades",
         params={
-            "select": "id,trade_time,instrument,side,setup,pnl,tags,rating,entry_type,taken",
+            "select": "id,trade_time,instrument,side,setup,pnl,tags,rating,entry_type,taken,entry,exit,risk_points,result_points",
             "order": "trade_time.asc",
             "limit": "5000",
         },
     )
     rows = filter_period(r.json(), period)
-    # Statystyki obejmują tylko faktycznie wykonane transakcje.
-    # Podsumowania oraz niewzięte setupy pozostają w feedzie, ale nie zmieniają PnL.
+    # Tylko wykonane TRADE wpływają na statystyki. Podsumowania i niewzięte setupy zostają w feedzie.
     rows = [
         x for x in rows
         if str(x.get("entry_type") or "TRADE").upper() == "TRADE"
         and x.get("taken") is not False
     ]
 
+    def row_points(row):
+        return calc_result_points(row.get("side"), row.get("entry"), row.get("exit"), row.get("result_points"))
+
+    def row_r(row):
+        return calc_r(row_points(row), row.get("risk_points"))
+
+    def outcome_value(row):
+        # Punktowy wynik transakcji najlepiej odzwierciedla win/loss; dla starych wpisów fallback do PnL.
+        pts = row_points(row)
+        return pts if pts is not None else float(row.get("pnl") or 0)
+
     pnls = [float(x.get("pnl") or 0) for x in rows]
-    trades = len(pnls)
+    trades = len(rows)
     total = sum(pnls)
-    wins = sum(1 for x in pnls if x > 0)
-    losses = sum(1 for x in pnls if x < 0)
+    wins = sum(1 for x in rows if outcome_value(x) > 0)
+    losses = sum(1 for x in rows if outcome_value(x) < 0)
+
+    point_values = [row_points(x) for x in rows]
+    point_values = [x for x in point_values if x is not None]
+    net_points = sum(point_values)
+    won_points = sum(x for x in point_values if x > 0)
+    lost_points = abs(sum(x for x in point_values if x < 0))
+
+    r_values = [row_r(x) for x in rows]
+    r_values = [x for x in r_values if x is not None]
+    total_r = sum(r_values)
+    avg_r = (total_r / len(r_values)) if r_values else None
 
     equity = []
     running = 0.0
+    equity_r = []
+    running_r = 0.0
     for row in rows:
         running += float(row.get("pnl") or 0)
         equity.append({"time": row.get("trade_time"), "value": running})
+        rv = row_r(row)
+        if rv is not None:
+            running_r += rv
+            equity_r.append({"time": row.get("trade_time"), "value": running_r})
 
     def group_by(field: str):
         groups = {}
         for row in rows:
             name = str(row.get(field) or "—").strip() or "—"
-            g = groups.setdefault(name, {"name": name, "trades": 0, "pnl": 0.0, "wins": 0})
+            g = groups.setdefault(name, {
+                "name": name, "trades": 0, "pnl": 0.0, "wins": 0,
+                "points": 0.0, "point_trades": 0, "total_r": 0.0, "r_trades": 0,
+            })
             p = float(row.get("pnl") or 0)
+            pts = row_points(row)
+            rv = row_r(row)
             g["trades"] += 1
             g["pnl"] += p
-            if p > 0:
+            if outcome_value(row) > 0:
                 g["wins"] += 1
+            if pts is not None:
+                g["points"] += pts
+                g["point_trades"] += 1
+            if rv is not None:
+                g["total_r"] += rv
+                g["r_trades"] += 1
         result = []
         for g in groups.values():
             g["win_rate"] = (g["wins"] / g["trades"] * 100) if g["trades"] else 0
+            g["avg_r"] = (g["total_r"] / g["r_trades"]) if g["r_trades"] else None
             result.append(g)
-        return sorted(result, key=lambda x: (x["pnl"], x["trades"]), reverse=True)
+        return sorted(
+            result,
+            key=lambda x: (x["total_r"] if x["r_trades"] else -10**9, x["points"] if x["point_trades"] else x["pnl"], x["trades"]),
+            reverse=True,
+        )
 
     daily = {}
     for row in rows:
@@ -461,15 +538,25 @@ async def analytics(
             day = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date().isoformat()
         except Exception:
             continue
-        d = daily.setdefault(day, {"date": day, "pnl": 0.0, "trades": 0, "wins": 0})
+        d = daily.setdefault(day, {
+            "date": day, "pnl": 0.0, "points": 0.0, "point_trades": 0,
+            "total_r": 0.0, "r_trades": 0, "trades": 0, "wins": 0,
+        })
         p = float(row.get("pnl") or 0)
+        pts = row_points(row)
+        rv = row_r(row)
         d["pnl"] += p
         d["trades"] += 1
-        if p > 0:
+        if outcome_value(row) > 0:
             d["wins"] += 1
+        if pts is not None:
+            d["points"] += pts
+            d["point_trades"] += 1
+        if rv is not None:
+            d["total_r"] += rv
+            d["r_trades"] += 1
 
     ratings = [int(x["rating"]) for x in rows if x.get("rating") is not None]
-
     return {
         "summary": {
             "trades": trades,
@@ -479,8 +566,16 @@ async def analytics(
             "wins": wins,
             "losses": losses,
             "avg_rating": (sum(ratings) / len(ratings)) if ratings else None,
+            "net_points": net_points,
+            "won_points": won_points,
+            "lost_points": lost_points,
+            "point_trades": len(point_values),
+            "total_r": total_r,
+            "avg_r": avg_r,
+            "r_trades": len(r_values),
         },
         "equity": equity,
+        "equity_r": equity_r,
         "by_setup": group_by("setup"),
         "by_instrument": group_by("instrument"),
         "by_side": group_by("side"),
@@ -537,6 +632,8 @@ async def create_trade(
     exit: str = Form(""),
     qty: str = Form(""),
     pnl: str = Form("0"),
+    result_points: str = Form(""),
+    risk_points: str = Form(""),
     rating: str = Form(""),
     tags: str = Form(""),
     notes: str = Form(""),
@@ -561,16 +658,27 @@ async def create_trade(
     if screenshot and screenshot.filename:
         screenshot_path = await upload_screenshot(screenshot)
 
+    parsed_entry = _optional_float(entry) if is_trade else None
+    parsed_exit = _optional_float(exit) if is_trade else None
+    parsed_result_points = _optional_float(result_points) if is_trade else None
+    parsed_risk_points = _optional_float(risk_points) if is_trade else None
+    if is_trade and parsed_result_points is None:
+        parsed_result_points = calc_result_points(clean_side, parsed_entry, parsed_exit)
+    if parsed_risk_points is not None and parsed_risk_points <= 0:
+        parsed_risk_points = None
+
     payload = {
         "instrument": instrument.strip().upper() if is_trade else "SUMMARY",
         "side": clean_side,
         "trade_time": trade_time,
         "exit_time": exit_time if (is_trade and exit_time.strip()) else None,
         "setup": setup.strip() if is_trade else "",
-        "entry": float(entry) if (is_trade and entry.strip()) else None,
-        "exit": float(exit) if (is_trade and exit.strip()) else None,
+        "entry": parsed_entry,
+        "exit": parsed_exit,
         "qty": int(qty) if (is_trade and qty.strip()) else None,
         "pnl": float(pnl or 0) if is_trade else 0,
+        "result_points": parsed_result_points,
+        "risk_points": parsed_risk_points,
         "rating": int(rating) if (is_trade and rating.strip()) else None,
         "tags": tags.strip(),
         "notes": notes.strip(),
@@ -604,6 +712,8 @@ async def update_trade(
     exit: str = Form(""),
     qty: str = Form(""),
     pnl: str = Form("0"),
+    result_points: str = Form(""),
+    risk_points: str = Form(""),
     rating: str = Form(""),
     tags: str = Form(""),
     notes: str = Form(""),
@@ -644,16 +754,27 @@ async def update_trade(
                 pass
         screenshot_path = new_path
 
+    parsed_entry = _optional_float(entry) if is_trade else None
+    parsed_exit = _optional_float(exit) if is_trade else None
+    parsed_result_points = _optional_float(result_points) if is_trade else None
+    parsed_risk_points = _optional_float(risk_points) if is_trade else None
+    if is_trade and parsed_result_points is None:
+        parsed_result_points = calc_result_points(clean_side, parsed_entry, parsed_exit)
+    if parsed_risk_points is not None and parsed_risk_points <= 0:
+        parsed_risk_points = None
+
     payload = {
         "instrument": instrument.strip().upper() if is_trade else "SUMMARY",
         "side": clean_side,
         "trade_time": trade_time,
         "exit_time": exit_time if (is_trade and exit_time.strip()) else None,
         "setup": setup.strip() if is_trade else "",
-        "entry": float(entry) if (is_trade and entry.strip()) else None,
-        "exit": float(exit) if (is_trade and exit.strip()) else None,
+        "entry": parsed_entry,
+        "exit": parsed_exit,
         "qty": int(qty) if (is_trade and qty.strip()) else None,
         "pnl": float(pnl or 0) if is_trade else 0,
+        "result_points": parsed_result_points,
+        "risk_points": parsed_risk_points,
         "rating": int(rating) if (is_trade and rating.strip()) else None,
         "tags": tags.strip(),
         "notes": notes.strip(),
@@ -706,7 +827,7 @@ JOURNAL_HTML = r"""
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Journal v2.6</title>
+<title>Trading Journal v2.7</title>
 <style>
 :root{--bg:#080d12;--panel:#101820;--panel2:#151f29;--line:#27333f;--text:#edf3f8;--muted:#82909d;--green:#48dc8a;--red:#ff7070;--blue:#2377f4;--yellow:#e7bd58}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}
@@ -716,19 +837,19 @@ JOURNAL_HTML = r"""
 .tabs{padding:0 18px 12px;display:flex;gap:7px;overflow:auto}.tab{white-space:nowrap;border:1px solid var(--line);background:transparent;color:#aeb9c4;padding:7px 12px;border-radius:999px}.tab.active{background:#1a2734;color:white;border-color:#3a4b5c}
 .filters{padding:12px 18px;display:grid;grid-template-columns:1fr 145px 150px 145px 170px 150px;gap:8px;border-bottom:1px solid var(--line)}
 .filters input,.filters select,.quick-grid input,.quick-grid select,.quick-grid textarea,.form-grid input,.form-grid select,.form-grid textarea{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:16px 18px 10px}.stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px}.stat .k{font-size:10px;color:var(--muted);font-weight:750}.stat .v{font-size:22px;font-weight:850;margin-top:5px}
+.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;padding:16px 18px 10px}.stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px}.stat .k{font-size:10px;color:var(--muted);font-weight:750}.stat .v{font-size:22px;font-weight:850;margin-top:5px}
 .analytics{padding:0 18px 14px;display:grid;grid-template-columns:1.5fr 1fr;gap:10px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px}.panel-title{font-weight:800;font-size:13px;margin-bottom:10px}
 .chart-wrap{height:220px}.chart-wrap canvas{width:100%;height:100%}.mini-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.mini{background:#0d141b;border:1px solid #202c38;border-radius:10px;padding:10px}.mini .n{font-size:13px;font-weight:850}.mini .m{font-size:10px;color:var(--muted);margin-top:4px}
 .breakdown{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:0 18px 14px}.table-panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px}.rows{display:flex;flex-direction:column;gap:7px}.row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;font-size:12px}.row .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row .wr{color:var(--muted)}
 .daily{padding:0 18px 14px}.day-list{display:grid;grid-template-columns:repeat(7,1fr);gap:7px}.day{background:#0d141b;border:1px solid #202c38;border-radius:9px;padding:8px;min-height:64px}.day .d{font-size:10px;color:var(--muted)}.day .p{font-weight:800;margin-top:5px}.day .t{font-size:10px;color:var(--muted);margin-top:4px}
 .feed{padding:0 18px 80px}.card{background:var(--panel);border:1px solid var(--line);border-radius:15px;overflow:hidden;margin-bottom:15px}.card-head{padding:13px 15px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line)}
 .symbol{font-size:18px;font-weight:850}.badge{font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#202a34;color:#cad4dd}.badge.long{background:rgba(72,220,138,.12);color:var(--green)}.badge.short{background:rgba(255,112,112,.12);color:var(--red)}.badge.missed{background:rgba(231,189,88,.13);color:var(--yellow)}.badge.summary{background:rgba(106,167,255,.13);color:#8dbaff}.trade-hidden{display:none!important}.checkline{display:flex;align-items:center;gap:9px;padding:9px 0;color:#d5dee6;font-size:12px}.checkline input{width:auto!important}
-.pnl{margin-left:auto;font-weight:850}.pos{color:var(--green)}.neg{color:var(--red)}.card-body{display:grid;grid-template-columns:minmax(280px,440px) 1fr;gap:16px;padding:15px}.shot{width:100%;aspect-ratio:16/9;object-fit:cover;background:#0d1218;border:1px solid var(--line);border-radius:11px}
+.pnl{margin-left:auto;font-weight:850}.trade-result{margin-left:auto;text-align:right;min-width:110px}.trade-result .r-main{font-size:18px;font-weight:900}.trade-result .pts-sub{font-size:11px;font-weight:750;margin-top:2px}.trade-result .cash-sub{font-size:10px;color:var(--muted);margin-top:2px}.r-preview{grid-column:1/-1;background:#0d141b;border:1px solid #202c38;border-radius:10px;padding:10px 12px;font-size:12px;color:#c9d5df}.r-preview strong{font-size:16px}.pos{color:var(--green)}.neg{color:var(--red)}.card-body{display:grid;grid-template-columns:minmax(280px,440px) 1fr;gap:16px;padding:15px}.shot{width:100%;aspect-ratio:16/9;object-fit:cover;background:#0d1218;border:1px solid var(--line);border-radius:11px}
 .meta{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}.meta span{font-size:11px;color:#bec8d1;background:#19212a;border:1px solid var(--line);border-radius:999px;padding:4px 7px}.note{white-space:pre-wrap;line-height:1.5}.lesson{margin-top:13px;padding-top:11px;border-top:1px solid var(--line)}.empty{text-align:center;color:var(--muted);padding:90px 15px}
 dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radius:15px;background:#0f151c;color:var(--text)}dialog::backdrop{background:rgba(0,0,0,.68)}.modal-head,.modal-foot{padding:14px 16px;display:flex;align-items:center;border-bottom:1px solid var(--line)}.modal-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end;gap:8px}
 .quick-grid{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:11px}.full{grid-column:1/-1}label{display:block;font-size:10px;color:var(--muted);font-weight:750;margin-bottom:5px}textarea{min-height:95px;resize:vertical}
 .details{grid-column:1/-1;border:1px solid var(--line);border-radius:11px;background:#0c131a}.details summary{cursor:pointer;padding:11px 12px;font-size:12px;font-weight:800;color:#c8d3dd}.details .form-grid{padding:0 12px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px}.preview{max-width:100%;max-height:250px;border-radius:10px;border:1px solid var(--line);display:none}.import-wrap{padding:16px}.import-controls{display:grid;grid-template-columns:1fr 180px;gap:10px;align-items:end}.import-options{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0;color:#c7d0d9;font-size:12px}.import-options label{display:flex;align-items:center;gap:7px;margin:0;font-size:12px}.import-options input{width:auto}.import-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.import-kpi{background:#0c131a;border:1px solid var(--line);border-radius:10px;padding:10px}.import-kpi .k{font-size:10px;color:var(--muted)}.import-kpi .v{font-weight:850;margin-top:4px}.import-table-wrap{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}.import-table{width:100%;border-collapse:collapse;font-size:11px}.import-table th,.import-table td{padding:8px;border-bottom:1px solid #202c38;text-align:left;white-space:nowrap}.import-table th{position:sticky;top:0;background:#151f29;z-index:1}.dup{opacity:.48}.import-errors{color:#ffaaaa;font-size:12px;white-space:pre-wrap;margin-top:10px}.hint{font-size:11px;color:var(--muted);line-height:1.45}
-@media(max-width:900px){.filters{grid-template-columns:1fr 1fr 1fr}.filters input{grid-column:1/-1}.analytics{grid-template-columns:1fr}.breakdown{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:900px){.stats{grid-template-columns:repeat(3,1fr)}.filters{grid-template-columns:1fr 1fr 1fr}.filters input{grid-column:1/-1}.analytics{grid-template-columns:1fr}.breakdown{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:700px){.import-controls{grid-template-columns:1fr}.import-summary{grid-template-columns:1fr 1fr}.header-row{padding:12px}.brand{font-size:19px}.tabs{padding:0 12px 10px}.filters{padding:10px 12px;grid-template-columns:1fr 1fr}.stats{padding:12px;grid-template-columns:1fr 1fr}.analytics,.breakdown,.daily,.feed{padding-left:12px;padding-right:12px}.card-body{grid-template-columns:1fr}.quick-grid{grid-template-columns:1fr}.full{grid-column:auto}.details{grid-column:auto}.details .form-grid{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(3,1fr)}}
 </style>
 </head>
@@ -736,7 +857,7 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
 <div class="app">
 <header class="header">
  <div class="header-row">
-  <div><div class="brand">Trading Journal v2.6</div><div class="sub">Feed · statystyki · equity · setupy · każde urządzenie</div></div><div class="spacer"></div>
+  <div><div class="brand">Trading Journal v2.7</div><div class="sub">Feed · R-multiple · punkty · PnL · setupy · import CSV</div></div><div class="spacer"></div>
   <button class="btn" onclick="openImport()">Import CSV</button>
   <button class="btn primary" onclick="openNew()">+ Dodaj wpis</button>
  </div>
@@ -752,17 +873,19 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
 </section>
 <section class="stats">
  <div class="stat"><div class="k">TRADES</div><div class="v" id="sTrades">0</div></div>
- <div class="stat"><div class="k">TOTAL PNL</div><div class="v" id="sPnl">$0.00</div></div>
+ <div class="stat"><div class="k">TOTAL R</div><div class="v" id="sTotalR">—</div></div>
+ <div class="stat"><div class="k">AVG R</div><div class="v" id="sAvgR">—</div></div>
+ <div class="stat"><div class="k">NET POINTS</div><div class="v" id="sPoints">—</div></div>
  <div class="stat"><div class="k">WIN RATE</div><div class="v" id="sWin">0%</div></div>
- <div class="stat"><div class="k">AVG TRADE</div><div class="v" id="sAvg">$0.00</div></div>
+ <div class="stat"><div class="k">TOTAL PNL</div><div class="v" id="sPnl">$0.00</div></div>
 </section>
 <section class="analytics">
- <div class="panel"><div class="panel-title">Equity curve</div><div class="chart-wrap"><canvas id="equityCanvas"></canvas></div></div>
+ <div class="panel"><div class="panel-title">Cumulative R</div><div class="chart-wrap"><canvas id="equityCanvas"></canvas></div></div>
  <div class="panel"><div class="panel-title">Szybki obraz okresu</div><div class="mini-grid">
   <div class="mini"><div class="n" id="miniWins">0</div><div class="m">Wins</div></div>
   <div class="mini"><div class="n" id="miniLosses">0</div><div class="m">Losses</div></div>
-  <div class="mini"><div class="n" id="miniRating">—</div><div class="m">Avg setup rating</div></div>
-  <div class="mini"><div class="n" id="miniBest">—</div><div class="m">Best setup</div></div>
+  <div class="mini"><div class="n" id="miniWonPts">—</div><div class="m">Won points</div></div>
+  <div class="mini"><div class="n" id="miniLostPts">—</div><div class="m">Lost points</div></div>
  </div></div>
 </section>
 <section class="breakdown">
@@ -770,7 +893,7 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
  <div class="table-panel"><div class="panel-title">Instrumenty</div><div id="instrumentRows" class="rows"></div></div>
  <div class="table-panel"><div class="panel-title">LONG vs SHORT</div><div id="sideRows" class="rows"></div></div>
 </section>
-<section class="daily"><div class="panel"><div class="panel-title">Daily PnL</div><div id="dayList" class="day-list"></div></div></section>
+<section class="daily"><div class="panel"><div class="panel-title">Daily R / Points / PnL</div><div id="dayList" class="day-list"></div></div></section>
 <main id="feed" class="feed"><div class="empty">Ładowanie...</div></main>
 </div>
 
@@ -780,8 +903,11 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
   <div><label>Typ wpisu</label><select id="entry_type" onchange="toggleEntryType()"><option value="TRADE">Trade</option><option value="SESSION">Podsumowanie sesji</option><option value="WEEK">Podsumowanie tygodnia</option><option value="MONTH">Podsumowanie miesiąca</option></select></div>
   <div><label>Data i czas</label><input id="trade_time" type="datetime-local"></div>
   <div class="trade-only"><label>Instrument</label><input id="instrument" list="instrumentList" value="MNQ"><datalist id="instrumentList"><option>MNQ</option><option>NQ</option><option>MES</option><option>ES</option><option>MCL</option><option>CL</option></datalist></div>
-  <div class="trade-only"><label>Kierunek</label><select id="side"><option>LONG</option><option>SHORT</option></select></div>
+  <div class="trade-only"><label>Kierunek</label><select id="side" onchange="updateRPreview()"><option>LONG</option><option>SHORT</option></select></div>
   <div class="trade-only"><label>PnL po kosztach</label><input id="pnl" type="number" step="any" placeholder="np. 250 albo -120"></div>
+  <div class="trade-only"><label>Wynik w pkt (+ zysk / − strata)</label><input id="result_points" type="number" step="0.25" placeholder="wyliczy się z Entry/Exit" oninput="updateRPreview()"></div>
+  <div class="trade-only"><label>Ryzyko 1R w pkt</label><input id="risk_points" type="number" step="0.25" min="0" placeholder="np. 20" oninput="updateRPreview()"></div>
+  <div id="rPreview" class="trade-only r-preview"><strong>R: —</strong><br><span>Wpisz ryzyko 1R; wynik pkt może wyliczyć się z Entry/Exit.</span></div>
   <div class="trade-only"><label>Setup</label><input id="setup" list="setupList" placeholder="np. ORB retest"><datalist id="setupList"></datalist></div>
   <div class="trade-only full"><label class="checkline"><input id="taken" type="checkbox" checked> Trade wykonany — licz do statystyk i PnL</label></div>
   <div class="full"><label>Screenshot</label><input id="screenshot" type="file" accept="image/*"><img id="preview" class="preview"></div>
@@ -789,8 +915,8 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
   <details class="details"><summary>Więcej szczegółów</summary><div class="form-grid">
    <div class="trade-only"><label>Wyjście — data i czas</label><input id="exit_time" type="datetime-local"></div>
    <div class="trade-only"><label>Qty</label><input id="qty" type="number" step="1"></div>
-   <div class="trade-only"><label>Entry</label><input id="entry" type="number" step="any"></div>
-   <div class="trade-only"><label>Exit</label><input id="exit" type="number" step="any"></div>
+   <div class="trade-only"><label>Entry</label><input id="entry" type="number" step="any" oninput="updateRPreview()"></div>
+   <div class="trade-only"><label>Exit</label><input id="exit" type="number" step="any" oninput="updateRPreview()"></div>
    <div class="trade-only"><label>Rating setupu</label><select id="rating"><option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
    <div><label>Tagi</label><input id="tags" placeholder="A+, trend, FOMO"></div>
    <div class="full"><label>Wniosek</label><textarea id="lesson" placeholder="Co powtórzyć / czego nie robić następnym razem?"></textarea></div>
@@ -825,14 +951,35 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
 </dialog>
 
 <script>
-const key=__SAFE_KEY__,dlg=document.getElementById('dlg'),importDlg=document.getElementById('importDlg');let editingId=null,currentPeriod='today',lastImportPreview=null;
+const key=__SAFE_KEY__,dlg=document.getElementById('dlg'),importDlg=document.getElementById('importDlg');let editingId=null,currentPeriod='today',lastImportPreview=null,lastEquityPoints=[];
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const money=v=>{const n=Number(v)||0;return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
 function nowLocal(){const d=new Date(),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}function isoFromLocal(v){return v?new Date(v).toISOString():new Date().toISOString()}function localInputFromIso(v){if(!v)return nowLocal();const d=new Date(v),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}
+function signed(v,d=2){if(v==null||!Number.isFinite(Number(v)))return '—';const n=Number(v);return `${n>0?'+':''}${n.toFixed(d)}`}
+function pointsOf(t){if(t?.result_points!=null&&Number.isFinite(Number(t.result_points)))return Number(t.result_points);const e=Number(t?.entry),x=Number(t?.exit);if(!Number.isFinite(e)||!Number.isFinite(x))return null;return String(t?.side).toUpperCase()==='LONG'?x-e:e-x}
+function rOf(t){const p=pointsOf(t),risk=Number(t?.risk_points);return p!=null&&Number.isFinite(risk)&&risk>0?p/risk:null}
+function updateRPreview(){
+ const box=$('rPreview');if(!box)return;
+ let pts=$('result_points').value.trim()===''?null:Number($('result_points').value);
+ if(pts==null){const e=Number($('entry').value),x=Number($('exit').value);if(Number.isFinite(e)&&Number.isFinite(x)&&$('entry').value!==''&&$('exit').value!=='')pts=$('side').value==='LONG'?x-e:e-x}
+ const risk=Number($('risk_points').value),rv=pts!=null&&Number.isFinite(risk)&&risk>0?pts/risk:null;
+ box.innerHTML=`<strong class="${rv>0?'pos':rv<0?'neg':''}">R: ${rv==null?'—':signed(rv,2)+'R'}</strong><br><span>${pts==null?'Wynik pkt: —':'Wynik pkt: '+signed(pts,2)} · ${Number.isFinite(risk)&&risk>0?'1R = '+risk.toFixed(2)+' pkt':'Ryzyko 1R: —'}</span>`;
+}
 async function loadOptions(){const r=await fetch(`/api/options/${encodeURIComponent(key)}`,{cache:'no-store'}),d=await r.json();const set=(id,first,vals)=>{const s=$(id),cur=s.value;s.innerHTML=`<option value="">${first}</option>`+vals.map(x=>`<option>${esc(x)}</option>`).join('');s.value=cur};set('instrumentFilter','Wszystkie instrumenty',d.instruments);set('setupFilter','Wszystkie setupy',d.setups);set('tagFilter','Wszystkie tagi',d.tags);$('setupList').innerHTML=d.setups.map(x=>`<option>${esc(x)}</option>`).join('')}
 function drawEquity(points){const c=$('equityCanvas'),box=c.getBoundingClientRect(),dpr=window.devicePixelRatio||1;c.width=Math.max(300,box.width*dpr);c.height=Math.max(160,box.height*dpr);const x=c.getContext('2d');x.scale(dpr,dpr);const w=box.width,h=box.height;x.clearRect(0,0,w,h);x.strokeStyle='#26323d';for(let i=1;i<4;i++){const y=h*i/4;x.beginPath();x.moveTo(0,y);x.lineTo(w,y);x.stroke()}if(!points.length){x.fillStyle='#82909d';x.font='12px system-ui';x.fillText('Brak danych',12,24);return}const vals=points.map(p=>Number(p.value)||0),min=Math.min(0,...vals),max=Math.max(0,...vals),span=(max-min)||1,xy=(v,i)=>[points.length===1?w/2:i/(points.length-1)*w,h-((v-min)/span)*(h-20)-10];x.strokeStyle='#6aa7ff';x.lineWidth=2;x.beginPath();vals.forEach((v,i)=>{const[a,b]=xy(v,i);i?x.lineTo(a,b):x.moveTo(a,b)});x.stroke();const last=vals.at(-1),[lx,ly]=xy(last,vals.length-1);x.fillStyle=last>=0?'#48dc8a':'#ff7070';x.beginPath();x.arc(lx,ly,4,0,Math.PI*2);x.fill()}
-function renderRows(id,rows){$(id).innerHTML=(rows||[]).slice(0,6).map(r=>`<div class="row"><div class="name">${esc(r.name)}</div><div class="${r.pnl>0?'pos':r.pnl<0?'neg':''}">${money(r.pnl)}</div><div class="wr">${Math.round(r.win_rate)}%</div></div>`).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>'}
-async function loadAnalytics(){const r=await fetch(`/api/analytics/${encodeURIComponent(key)}?period=${currentPeriod}`,{cache:'no-store'}),d=await r.json(),s=d.summary;$('sTrades').textContent=s.trades;$('sPnl').textContent=money(s.total_pnl).replace('+','');$('sPnl').className='v '+(s.total_pnl>0?'pos':s.total_pnl<0?'neg':'');$('sWin').textContent=Math.round(s.win_rate)+'%';$('sAvg').textContent=money(s.avg_trade).replace('+','');$('miniWins').textContent=s.wins;$('miniLosses').textContent=s.losses;$('miniRating').textContent=s.avg_rating==null?'—':s.avg_rating.toFixed(1)+'/5';$('miniBest').textContent=d.by_setup?.[0]?.name||'—';renderRows('setupRows',d.by_setup);renderRows('instrumentRows',d.by_instrument);renderRows('sideRows',d.by_side);$('dayList').innerHTML=(d.daily||[]).slice(0,21).map(v=>`<div class="day"><div class="d">${esc(v.date)}</div><div class="p ${v.pnl>0?'pos':v.pnl<0?'neg':''}">${money(v.pnl)}</div><div class="t">${v.trades} trades</div></div>`).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>';drawEquity(d.equity||[])}
+function renderRows(id,rows){$(id).innerHTML=(rows||[]).slice(0,6).map(r=>{const hasR=Number(r.r_trades)>0,rv=hasR?Number(r.total_r):null,pts=Number(r.point_trades)>0?Number(r.points):null;return `<div class="row"><div class="name">${esc(r.name)}</div><div class="${rv>0?'pos':rv<0?'neg':''}" title="${pts==null?'':signed(pts,1)+' pkt'}">${rv==null?'— R':signed(rv,2)+'R'}</div><div class="wr">${Math.round(r.win_rate)}%</div></div>`}).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>'}
+async function loadAnalytics(){const r=await fetch(`/api/analytics/${encodeURIComponent(key)}?period=${currentPeriod}`,{cache:'no-store'}),d=await r.json(),s=d.summary;
+ $('sTrades').textContent=s.trades;
+ $('sTotalR').textContent=s.r_trades?signed(s.total_r,2)+'R':'—';$('sTotalR').className='v '+(s.total_r>0?'pos':s.total_r<0?'neg':'');
+ $('sAvgR').textContent=s.avg_r==null?'—':signed(s.avg_r,2)+'R';$('sAvgR').className='v '+(s.avg_r>0?'pos':s.avg_r<0?'neg':'');
+ $('sPoints').textContent=s.point_trades?signed(s.net_points,1):'—';$('sPoints').className='v '+(s.net_points>0?'pos':s.net_points<0?'neg':'');
+ $('sPnl').textContent=money(s.total_pnl).replace('+','');$('sPnl').className='v '+(s.total_pnl>0?'pos':s.total_pnl<0?'neg':'');
+ $('sWin').textContent=(Math.round(s.win_rate*100)/100).toFixed(s.win_rate%1?2:0)+'%';
+ $('miniWins').textContent=s.wins;$('miniLosses').textContent=s.losses;$('miniWonPts').textContent=s.point_trades?signed(s.won_points,1):'—';$('miniLostPts').textContent=s.point_trades?'-'+Number(s.lost_points||0).toFixed(1):'—';
+ renderRows('setupRows',d.by_setup);renderRows('instrumentRows',d.by_instrument);renderRows('sideRows',d.by_side);
+ $('dayList').innerHTML=(d.daily||[]).slice(0,21).map(v=>`<div class="day"><div class="d">${esc(v.date)}</div><div class="p ${v.total_r>0?'pos':v.total_r<0?'neg':''}">${v.r_trades?signed(v.total_r,2)+'R':'— R'}</div><div class="t">${v.point_trades?signed(v.points,1)+' pkt · ':''}${money(v.pnl)} · ${v.trades} trades</div></div>`).join('')||'<div style="color:var(--muted);font-size:12px">Brak danych</div>';
+ lastEquityPoints=d.equity_r||[];drawEquity(lastEquityPoints)
+}
 const TYPE_LABELS={TRADE:'Trade',SESSION:'Podsumowanie sesji',WEEK:'Podsumowanie tygodnia',MONTH:'Podsumowanie miesiąca'};
 function entryTypeOf(t){return String(t.entry_type||'TRADE').toUpperCase()}
 function renderFeedCard(t){
@@ -842,8 +989,11 @@ function renderFeedCard(t){
  if(kind!=='TRADE'){
   return `<article class="card"><div class="card-head"><div class="symbol">${esc(TYPE_LABELS[kind]||'Podsumowanie')}</div><span class="badge summary">SUMMARY</span></div><div class="card-body"><div>${shot}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${commonMeta}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`;
  }
- const pnl=Number(t.pnl)||0, taken=t.taken!==false;
- return `<article class="card"><div class="card-head"><div class="symbol">${esc(t.instrument)}</div><span class="badge ${t.side==='LONG'?'long':'short'}">${esc(t.side)}</span>${!taken?'<span class="badge missed">NIEWZIĘTY</span>':''}${t.setup?`<span class="badge">${esc(t.setup)}</span>`:''}<div class="pnl ${taken?(pnl>0?'pos':pnl<0?'neg':''):''}" style="${taken?'':'opacity:.55'}">${money(pnl)}</div></div><div class="card-body"><div>${shot}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${t.exit_time?`<span>Wyjście ${esc(new Date(t.exit_time).toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'}))}</span>`:''}${t.entry!=null?`<span>Entry ${esc(t.entry)}</span>`:''}${t.exit!=null?`<span>Exit ${esc(t.exit)}</span>`:''}${t.qty!=null?`<span>Qty ${esc(t.qty)}</span>`:''}${t.rating?`<span>${'★'.repeat(Number(t.rating))}</span>`:''}${commonMeta}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`;
+ const pnl=Number(t.pnl)||0,taken=t.taken!==false,pts=pointsOf(t),rv=rOf(t),risk=t.risk_points!=null?Number(t.risk_points):null;
+ const resultHead=taken
+  ?`<div class="trade-result"><div class="r-main ${rv>0?'pos':rv<0?'neg':''}">${rv==null?'— R':signed(rv,2)+'R'}</div><div class="pts-sub ${pts>0?'pos':pts<0?'neg':''}">${pts==null?'— pkt':signed(pts,1)+' pkt'}</div><div class="cash-sub">${money(pnl)}</div></div>`
+  :`<div class="trade-result"><div class="r-main ${rv>0?'pos':rv<0?'neg':''}">Hip. ${rv==null?'— R':signed(rv,2)+'R'}</div><div class="pts-sub">${pts==null?'— pkt':signed(pts,1)+' pkt'}</div><div class="cash-sub">NIE LICZY SIĘ</div></div>`;
+ return `<article class="card"><div class="card-head"><div class="symbol">${esc(t.instrument)}</div><span class="badge ${t.side==='LONG'?'long':'short'}">${esc(t.side)}</span>${!taken?'<span class="badge missed">NIEWZIĘTY</span>':''}${t.setup?`<span class="badge">${esc(t.setup)}</span>`:''}${resultHead}</div><div class="card-body"><div>${shot}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${t.exit_time?`<span>Wyjście ${esc(new Date(t.exit_time).toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'}))}</span>`:''}${risk!=null&&Number.isFinite(risk)?`<span>1R = ${risk.toFixed(1)} pkt</span>`:''}${t.entry!=null?`<span>Entry ${esc(t.entry)}</span>`:''}${t.exit!=null?`<span>Exit ${esc(t.exit)}</span>`:''}${t.qty!=null?`<span>Qty ${esc(t.qty)}</span>`:''}${t.rating?`<span>${'★'.repeat(Number(t.rating))}</span>`:''}${commonMeta}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`;
 }
 async function loadFeed(){
  const p=new URLSearchParams({period:currentPeriod});
@@ -866,20 +1016,21 @@ function toggleEntryType(){
  $('saveBtn').textContent=isTrade?'Zapisz trade':'Zapisz podsumowanie';
  $('notesLabel').textContent=isTrade?'Opis':'Podsumowanie';
  $('notes').placeholder=isTrade?'Co widziałem i dlaczego wszedłem?':'Najważniejsze obserwacje, przebieg i wnioski z okresu...';
+ if(isTrade)updateRPreview();
 }
 function openNew(){
- editingId=null;$('entry_type').value='TRADE';$('taken').checked=true;$('instrument').value='MNQ';$('side').value='LONG';$('pnl').value='';$('setup').value='';$('notes').value='';
+ editingId=null;$('entry_type').value='TRADE';$('taken').checked=true;$('instrument').value='MNQ';$('side').value='LONG';$('pnl').value='';$('result_points').value='';$('risk_points').value='';$('setup').value='';$('notes').value='';
  ['entry','exit','qty','rating','tags','lesson'].forEach(id=>$(id).value='');$('trade_time').value=nowLocal();$('exit_time').value='';$('screenshot').value='';$('preview').style.display='none';$('preview').src='';$('deleteBtn').style.display='none';toggleEntryType();dlg.showModal();
 }
 window.editTrade=t=>{
- editingId=t.id;$('entry_type').value=entryTypeOf(t);$('taken').checked=t.taken!==false;$('instrument').value=(t.instrument==='SUMMARY'?'MNQ':t.instrument)||'MNQ';$('side').value=t.side||'LONG';$('pnl').value=t.pnl??'';$('setup').value=t.setup||'';$('notes').value=t.notes||'';$('trade_time').value=localInputFromIso(t.trade_time);$('exit_time').value=t.exit_time?localInputFromIso(t.exit_time):'';
+ editingId=t.id;$('entry_type').value=entryTypeOf(t);$('taken').checked=t.taken!==false;$('instrument').value=(t.instrument==='SUMMARY'?'MNQ':t.instrument)||'MNQ';$('side').value=t.side||'LONG';$('pnl').value=t.pnl??'';$('result_points').value=t.result_points??'';$('risk_points').value=t.risk_points??'';$('setup').value=t.setup||'';$('notes').value=t.notes||'';$('trade_time').value=localInputFromIso(t.trade_time);$('exit_time').value=t.exit_time?localInputFromIso(t.exit_time):'';
  ['entry','exit','qty','rating','tags','lesson'].forEach(id=>$(id).value=t[id]??'');$('screenshot').value='';const p=$('preview');if(t.screenshot_url){p.src=t.screenshot_url;p.style.display='block'}else{p.src='';p.style.display='none'}$('deleteBtn').style.display='inline-block';toggleEntryType();dlg.showModal();
 }
 $('screenshot').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const p=$('preview');p.src=URL.createObjectURL(f);p.style.display='block'})
 async function saveTrade(){
  const kind=$('entry_type').value;if(kind==='TRADE'&&!$('instrument').value.trim())return alert('Podaj instrument.');
  const fd=new FormData();fd.append('entry_type',kind);fd.append('taken',$('taken').checked?'true':'false');fd.append('instrument',$('instrument').value.trim());fd.append('side',$('side').value);fd.append('trade_time',isoFromLocal($('trade_time').value));fd.append('exit_time',$('exit_time').value?isoFromLocal($('exit_time').value):'');
- ['setup','entry','exit','qty','pnl','rating','tags','notes','lesson'].forEach(id=>fd.append(id,$(id).value));const file=$('screenshot').files[0];if(file)fd.append('screenshot',file);let method='POST';if(editingId){method='PUT';fd.append('trade_id',editingId)}const r=await fetch(`/api/trades/${encodeURIComponent(key)}`,{method,body:fd});if(!r.ok){alert(await r.text());return}dlg.close();await loadOptions();await refresh();
+ ['setup','entry','exit','qty','pnl','result_points','risk_points','rating','tags','notes','lesson'].forEach(id=>fd.append(id,$(id).value));const file=$('screenshot').files[0];if(file)fd.append('screenshot',file);let method='POST';if(editingId){method='PUT';fd.append('trade_id',editingId)}const r=await fetch(`/api/trades/${encodeURIComponent(key)}`,{method,body:fd});if(!r.ok){alert(await r.text());return}dlg.close();await loadOptions();await refresh();
 }
 function openImport(){lastImportPreview=null;$('csvFile').value='';$('csvNormalize').checked=true;$('csvSkipDup').checked=true;$('importSummary').style.display='none';$('importRows').innerHTML='';$('importErrors').textContent='';$('doImportBtn').disabled=true;importDlg.showModal()}
 function importFd(){const f=$('csvFile').files[0];if(!f){alert('Wybierz plik CSV.');return null}const fd=new FormData();fd.append('file',f);fd.append('normalize_symbol',$('csvNormalize').checked?'true':'false');return fd}
@@ -887,7 +1038,7 @@ function fmtDt(v){return new Date(v).toLocaleString('pl-PL',{timeZone:'Europe/Lo
 async function previewCsv(){const fd=importFd();if(!fd)return;$('doImportBtn').disabled=true;const r=await fetch(`/api/import-csv-preview/${encodeURIComponent(key)}`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}if(!r.ok){alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}lastImportPreview=d;$('importSummary').style.display='block';$('impCount').textContent=d.count;$('impPnl').textContent=money(d.pnl_total);$('impPnl').className='v '+(d.pnl_total>0?'pos':d.pnl_total<0?'neg':'');$('dupInfo').textContent=d.duplicates?`${d.duplicates} z ${d.count} wygląda na już istniejące. Przy włączonym „Pomijaj duplikaty” zostaną pominięte.`:`Nie wykryto duplikatów. Do importu: ${d.new_count}.`;$('importRows').innerHTML=d.items.map((t,i)=>`<tr class="${t.duplicate?'dup':''}"><td>${i+1}${t.duplicate?' · DUP':''}</td><td>${esc(fmtDt(t.trade_time))}</td><td>${esc(fmtDt(t.exit_time))}</td><td>${esc(t.instrument)}</td><td>${esc(t.side)}</td><td>${esc(t.qty)}</td><td>${esc(t.entry)}</td><td>${esc(t.exit)}</td><td class="${t.pnl>0?'pos':t.pnl<0?'neg':''}">${money(t.pnl)}</td></tr>`).join('');$('importErrors').textContent=(d.errors||[]).join('\n');$('doImportBtn').disabled=!!(d.errors||[]).length||!d.count}
 async function doImportCsv(){if(!lastImportPreview){alert('Najpierw kliknij „Sprawdź plik”.');return}const fd=importFd();if(!fd)return;fd.append('skip_duplicates',$('csvSkipDup').checked?'true':'false');$('doImportBtn').disabled=true;const r=await fetch(`/api/import-csv/${encodeURIComponent(key)}`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}if(!r.ok){$('doImportBtn').disabled=false;alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}importDlg.close();await loadOptions();await refresh();alert(`Zaimportowano: ${d.imported}\nPominięto duplikatów: ${d.skipped}\nPnL netto zaimportowanych: ${money(d.net_total_imported)}`)}
 async function deleteCurrent(){if(!editingId||!confirm('Usunąć ten wpis?'))return;const r=await fetch(`/api/trades/${encodeURIComponent(key)}?trade_id=${encodeURIComponent(editingId)}`,{method:'DELETE'});if(!r.ok){alert(await r.text());return}dlg.close();await loadOptions();await refresh()}
-['search','typeFilter','instrumentFilter','sideFilter','setupFilter','tagFilter'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',loadFeed));window.addEventListener('resize',()=>drawEquity([]));
+['search','typeFilter','instrumentFilter','sideFilter','setupFilter','tagFilter'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',loadFeed));window.addEventListener('resize',()=>drawEquity(lastEquityPoints));
 (async()=>{await loadOptions();await refresh();setInterval(loadFeed,15000)})();
 </script>
 </body>
