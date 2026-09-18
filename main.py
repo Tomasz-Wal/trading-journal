@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Que
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Tomasz Trading Journal v2.8")
+app = FastAPI(title="Tomasz Trading Journal v2.8.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,11 +57,11 @@ async def sb_request(method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "app": "Tomasz Trading Journal v2.8", "open": "/journal/YOUR_JOURNAL_KEY"}
+    return {"ok": True, "app": "Tomasz Trading Journal v2.8.1", "open": "/journal/YOUR_JOURNAL_KEY"}
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "2.8", "backup_reset": True}
+    return {"ok": True, "version": "2.8.1", "backup_reset": True}
 
 def range_start(period: str):
     now = datetime.now(timezone.utc)
@@ -121,7 +121,7 @@ async def _upload_backup(rows: list[dict], reason: str) -> dict:
     path = f"{BACKUP_PREFIX}/{filename}"
     backup = {
         "format": "tomasz-trading-journal-backup",
-        "version": "2.8",
+        "version": "2.8.1",
         "created_at_uk": now_uk.isoformat(),
         "reason": safe_reason,
         "entry_count": len(rows),
@@ -518,6 +518,19 @@ async def import_csv(
         "net_total_imported": round(sum(float(x["pnl"]) for x in payloads), 2),
     }
 
+@app.get("/api/backups/{key:path}/download")
+async def download_backup(key: str, path: str = Query(...)):
+    check_key(key)
+    if not _backup_path_ok(path):
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka backupu.")
+    r = await sb_request("GET", f"/storage/v1/object/{STORAGE_BUCKET}/{path}")
+    filename = path.rsplit("/", 1)[-1]
+    return Response(
+        content=r.content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 @app.get("/api/backups/{key:path}")
 async def list_backups(key: str):
     check_key(key)
@@ -554,19 +567,6 @@ async def create_backup(key: str):
     check_key(key)
     info = await _create_journal_backup("manual")
     return {"ok": True, "backup": info}
-
-@app.get("/api/backups/{key:path}/download")
-async def download_backup(key: str, path: str = Query(...)):
-    check_key(key)
-    if not _backup_path_ok(path):
-        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka backupu.")
-    r = await sb_request("GET", f"/storage/v1/object/{STORAGE_BUCKET}/{path}")
-    filename = path.rsplit("/", 1)[-1]
-    return Response(
-        content=r.content,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
 
 @app.post("/api/journal-reset/{key:path}")
 async def reset_journal(key: str, confirmation: str = Form(...)):
