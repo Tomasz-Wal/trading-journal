@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Que
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Tomasz Trading Journal v2.8.1")
+app = FastAPI(title="Tomasz Trading Journal v2.8.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,11 +57,11 @@ async def sb_request(method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "app": "Tomasz Trading Journal v2.8.1", "open": "/journal/YOUR_JOURNAL_KEY"}
+    return {"ok": True, "app": "Tomasz Trading Journal v2.8.2", "open": "/journal/YOUR_JOURNAL_KEY"}
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "2.8.1", "backup_reset": True}
+    return {"ok": True, "version": "2.8.2", "backup_reset": True}
 
 def range_start(period: str):
     now = datetime.now(timezone.utc)
@@ -96,6 +96,7 @@ UK_TZ = ZoneInfo("Europe/London")
 # Rzeczywisty koszt round-trip z konta Tradify / Cash History.
 # Importer zapisuje w journalu wyłącznie PnL po kosztach.
 ROUND_TRIP_FEES = {"MNQ": 1.90}
+DEFAULT_RISK_POINTS = 20.0  # domyślne 1R / SL w punktach dla każdego trade'u
 
 # Backupy journala są przechowywane jako JSON w tym samym prywatnym bucketcie
 # Supabase Storage co screenshoty. Reset nigdy nie usuwa screenshotów; backup
@@ -121,7 +122,7 @@ async def _upload_backup(rows: list[dict], reason: str) -> dict:
     path = f"{BACKUP_PREFIX}/{filename}"
     backup = {
         "format": "tomasz-trading-journal-backup",
-        "version": "2.8.1",
+        "version": "2.8.2",
         "created_at_uk": now_uk.isoformat(),
         "reason": safe_reason,
         "entry_count": len(rows),
@@ -306,7 +307,7 @@ def _parse_performance_csv(data: bytes, normalize_symbol: bool) -> tuple[list[di
                 "qty": qty,
                 "pnl": net_pnl,
                 "result_points": round((exit_price - entry) if side == "LONG" else (entry - exit_price), 8),
-                "risk_points": None,
+                "risk_points": DEFAULT_RISK_POINTS,
                 "source_buy_fill_id": str(row.get("buyFillId") or "").strip(),
                 "source_sell_fill_id": str(row.get("sellFillId") or "").strip(),
             })
@@ -489,7 +490,7 @@ async def import_csv(
             "qty": t["qty"],
             "pnl": t["pnl"],
             "result_points": t.get("result_points"),
-            "risk_points": None,
+            "risk_points": t.get("risk_points") or DEFAULT_RISK_POINTS,
             "rating": None,
             "tags": "CSV import",
             "notes": "",
@@ -645,7 +646,7 @@ async def analytics(
         return calc_result_points(row.get("side"), row.get("entry"), row.get("exit"), row.get("result_points"))
 
     def row_r(row):
-        return calc_r(row_points(row), row.get("risk_points"))
+        return calc_r(row_points(row), row.get("risk_points") or DEFAULT_RISK_POINTS)
 
     def outcome_value(row):
         # Punktowy wynik transakcji najlepiej odzwierciedla win/loss; dla starych wpisów fallback do PnL.
@@ -848,6 +849,8 @@ async def create_trade(
         parsed_result_points = calc_result_points(clean_side, parsed_entry, parsed_exit)
     if parsed_risk_points is not None and parsed_risk_points <= 0:
         parsed_risk_points = None
+    if is_trade and parsed_risk_points is None:
+        parsed_risk_points = DEFAULT_RISK_POINTS
 
     payload = {
         "instrument": instrument.strip().upper() if is_trade else "SUMMARY",
@@ -944,6 +947,8 @@ async def update_trade(
         parsed_result_points = calc_result_points(clean_side, parsed_entry, parsed_exit)
     if parsed_risk_points is not None and parsed_risk_points <= 0:
         parsed_risk_points = None
+    if is_trade and parsed_risk_points is None:
+        parsed_risk_points = DEFAULT_RISK_POINTS
 
     payload = {
         "instrument": instrument.strip().upper() if is_trade else "SUMMARY",
@@ -1040,7 +1045,7 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
 <div class="app">
 <header class="header">
  <div class="header-row">
-  <div><div class="brand">Trading Journal v2.8</div><div class="sub">Feed · R-multiple · punkty · PnL · setupy · import CSV · backup</div></div><div class="spacer"></div>
+  <div><div class="brand">Trading Journal v2.8.2</div><div class="sub">Feed · R-multiple · punkty · PnL · setupy · import CSV · backup</div></div><div class="spacer"></div>
   <button class="btn" onclick="openBackups()">Backupy / Reset</button>
   <button class="btn" onclick="openImport()">Import CSV</button>
   <button class="btn primary" onclick="openNew()">+ Dodaj wpis</button>
@@ -1090,7 +1095,7 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
   <div class="trade-only"><label>Kierunek</label><select id="side" onchange="updateRPreview()"><option>LONG</option><option>SHORT</option></select></div>
   <div class="trade-only"><label>PnL po kosztach</label><input id="pnl" type="number" step="any" placeholder="np. 250 albo -120"></div>
   <div class="trade-only"><label>Wynik w pkt (+ zysk / − strata)</label><input id="result_points" type="number" step="0.25" placeholder="wyliczy się z Entry/Exit" oninput="updateRPreview()"></div>
-  <div class="trade-only"><label>Ryzyko 1R w pkt</label><input id="risk_points" type="number" step="0.25" min="0" placeholder="np. 20" oninput="updateRPreview()"></div>
+  <div class="trade-only"><label>Ryzyko 1R / SL w pkt</label><input id="risk_points" type="number" step="0.25" min="0" value="20" placeholder="20" oninput="updateRPreview()"></div>
   <div id="rPreview" class="trade-only r-preview"><strong>R: —</strong><br><span>Wpisz ryzyko 1R; wynik pkt może wyliczyć się z Entry/Exit.</span></div>
   <div class="trade-only"><label>Setup</label><input id="setup" list="setupList" placeholder="np. ORB retest"><datalist id="setupList"></datalist></div>
   <div class="trade-only full"><label class="checkline"><input id="taken" type="checkbox" checked> Trade wykonany — licz do statystyk i PnL</label></div>
@@ -1157,7 +1162,7 @@ const money=v=>{const n=Number(v)||0;return(n>=0?'+':'-')+'$'+Math.abs(n).toLoca
 function nowLocal(){const d=new Date(),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}function isoFromLocal(v){return v?new Date(v).toISOString():new Date().toISOString()}function localInputFromIso(v){if(!v)return nowLocal();const d=new Date(v),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}
 function signed(v,d=2){if(v==null||!Number.isFinite(Number(v)))return '—';const n=Number(v);return `${n>0?'+':''}${n.toFixed(d)}`}
 function pointsOf(t){if(t?.result_points!=null&&Number.isFinite(Number(t.result_points)))return Number(t.result_points);const e=Number(t?.entry),x=Number(t?.exit);if(!Number.isFinite(e)||!Number.isFinite(x))return null;return String(t?.side).toUpperCase()==='LONG'?x-e:e-x}
-function rOf(t){const p=pointsOf(t),risk=Number(t?.risk_points);return p!=null&&Number.isFinite(risk)&&risk>0?p/risk:null}
+function rOf(t){const p=pointsOf(t),raw=t?.risk_points;const risk=(raw==null||raw==='')?20:Number(raw);return p!=null&&Number.isFinite(risk)&&risk>0?p/risk:null}
 function updateRPreview(){
  const box=$('rPreview');if(!box)return;
  let pts=$('result_points').value.trim()===''?null:Number($('result_points').value);
@@ -1189,7 +1194,7 @@ function renderFeedCard(t){
  if(kind!=='TRADE'){
   return `<article class="card"><div class="card-head"><div class="symbol">${esc(TYPE_LABELS[kind]||'Podsumowanie')}</div><span class="badge summary">SUMMARY</span></div><div class="card-body"><div>${shot}</div><div><div style="font-size:12px;color:var(--muted)">${esc(date)}</div><div class="meta">${commonMeta}</div><div class="note">${esc(t.notes||'')}</div>${t.lesson?`<div class="lesson"><b>Wniosek:</b><div class="note">${esc(t.lesson)}</div></div>`:''}<div style="margin-top:13px"><button class="btn" onclick='editTrade(${JSON.stringify(t).replaceAll("'","&#39;")})'>Edytuj</button></div></div></div></article>`;
  }
- const pnl=Number(t.pnl)||0,taken=t.taken!==false,pts=pointsOf(t),rv=rOf(t),risk=t.risk_points!=null?Number(t.risk_points):null;
+ const pnl=Number(t.pnl)||0,taken=t.taken!==false,pts=pointsOf(t),rv=rOf(t),risk=(t.risk_points==null||t.risk_points==='')?20:Number(t.risk_points);
  const resultHead=taken
   ?`<div class="trade-result"><div class="r-main ${rv>0?'pos':rv<0?'neg':''}">${rv==null?'— R':signed(rv,2)+'R'}</div><div class="pts-sub ${pts>0?'pos':pts<0?'neg':''}">${pts==null?'— pkt':signed(pts,1)+' pkt'}</div><div class="cash-sub">${money(pnl)}</div></div>`
   :`<div class="trade-result"><div class="r-main ${rv>0?'pos':rv<0?'neg':''}">Hip. ${rv==null?'— R':signed(rv,2)+'R'}</div><div class="pts-sub">${pts==null?'— pkt':signed(pts,1)+' pkt'}</div><div class="cash-sub">NIE LICZY SIĘ</div></div>`;
@@ -1219,11 +1224,11 @@ function toggleEntryType(){
  if(isTrade)updateRPreview();
 }
 function openNew(){
- editingId=null;$('entry_type').value='TRADE';$('taken').checked=true;$('instrument').value='MNQ';$('side').value='LONG';$('pnl').value='';$('result_points').value='';$('risk_points').value='';$('setup').value='';$('notes').value='';
+ editingId=null;$('entry_type').value='TRADE';$('taken').checked=true;$('instrument').value='MNQ';$('side').value='LONG';$('pnl').value='';$('result_points').value='';$('risk_points').value='20';$('setup').value='';$('notes').value='';
  ['entry','exit','qty','rating','tags','lesson'].forEach(id=>$(id).value='');$('trade_time').value=nowLocal();$('exit_time').value='';$('screenshot').value='';$('preview').style.display='none';$('preview').src='';$('deleteBtn').style.display='none';toggleEntryType();dlg.showModal();
 }
 window.editTrade=t=>{
- editingId=t.id;$('entry_type').value=entryTypeOf(t);$('taken').checked=t.taken!==false;$('instrument').value=(t.instrument==='SUMMARY'?'MNQ':t.instrument)||'MNQ';$('side').value=t.side||'LONG';$('pnl').value=t.pnl??'';$('result_points').value=t.result_points??'';$('risk_points').value=t.risk_points??'';$('setup').value=t.setup||'';$('notes').value=t.notes||'';$('trade_time').value=localInputFromIso(t.trade_time);$('exit_time').value=t.exit_time?localInputFromIso(t.exit_time):'';
+ editingId=t.id;$('entry_type').value=entryTypeOf(t);$('taken').checked=t.taken!==false;$('instrument').value=(t.instrument==='SUMMARY'?'MNQ':t.instrument)||'MNQ';$('side').value=t.side||'LONG';$('pnl').value=t.pnl??'';$('result_points').value=t.result_points??'';$('risk_points').value=t.risk_points??20;$('setup').value=t.setup||'';$('notes').value=t.notes||'';$('trade_time').value=localInputFromIso(t.trade_time);$('exit_time').value=t.exit_time?localInputFromIso(t.exit_time):'';
  ['entry','exit','qty','rating','tags','lesson'].forEach(id=>$(id).value=t[id]??'');$('screenshot').value='';const p=$('preview');if(t.screenshot_url){p.src=t.screenshot_url;p.style.display='block'}else{p.src='';p.style.display='none'}$('deleteBtn').style.display='inline-block';toggleEntryType();dlg.showModal();
 }
 $('screenshot').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const p=$('preview');p.src=URL.createObjectURL(f);p.style.display='block'})
