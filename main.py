@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Que
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Tomasz Trading Journal v2.7")
+app = FastAPI(title="Tomasz Trading Journal v2.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,11 +57,11 @@ async def sb_request(method: str, path: str, **kwargs):
 
 @app.get("/")
 def root():
-    return {"ok": True, "app": "Tomasz Trading Journal v2.7", "open": "/journal/YOUR_JOURNAL_KEY"}
+    return {"ok": True, "app": "Tomasz Trading Journal v2.8", "open": "/journal/YOUR_JOURNAL_KEY"}
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "2.5"}
+    return {"ok": True, "version": "2.8", "backup_reset": True}
 
 def range_start(period: str):
     now = datetime.now(timezone.utc)
@@ -96,6 +96,88 @@ UK_TZ = ZoneInfo("Europe/London")
 # Rzeczywisty koszt round-trip z konta Tradify / Cash History.
 # Importer zapisuje w journalu wyłącznie PnL po kosztach.
 ROUND_TRIP_FEES = {"MNQ": 1.90}
+
+# Backupy journala są przechowywane jako JSON w tym samym prywatnym bucketcie
+# Supabase Storage co screenshoty. Reset nigdy nie usuwa screenshotów; backup
+# zachowuje ich ścieżki, dzięki czemu po restore karty odzyskują obrazy.
+BACKUP_PREFIX = "journal-backups"
+
+def _backup_path_ok(path: str) -> bool:
+    path = str(path or "").strip()
+    return bool(path.startswith(BACKUP_PREFIX + "/") and path.endswith(".json") and ".." not in path)
+
+async def _fetch_all_trades() -> list[dict]:
+    r = await sb_request(
+        "GET",
+        "/rest/v1/trades",
+        params={"select": "*", "order": "trade_time.asc", "limit": "10000"},
+    )
+    return r.json()
+
+async def _upload_backup(rows: list[dict], reason: str) -> dict:
+    now_uk = datetime.now(UK_TZ)
+    safe_reason = re.sub(r"[^a-z0-9_-]+", "-", str(reason or "backup").lower()).strip("-") or "backup"
+    filename = f"{safe_reason}_{now_uk.strftime('%Y%m%d_%H%M%S')}_{len(rows)}entries_{uuid.uuid4().hex[:8]}.json"
+    path = f"{BACKUP_PREFIX}/{filename}"
+    backup = {
+        "format": "tomasz-trading-journal-backup",
+        "version": "2.8",
+        "created_at_uk": now_uk.isoformat(),
+        "reason": safe_reason,
+        "entry_count": len(rows),
+        "trades": rows,
+    }
+    data = json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+    await sb_request(
+        "POST",
+        f"/storage/v1/object/{STORAGE_BUCKET}/{path}",
+        content=data,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "x-upsert": "false",
+        },
+    )
+    return {"path": path, "filename": filename, "entry_count": len(rows), "created_at_uk": now_uk.isoformat(), "reason": safe_reason}
+
+async def _create_journal_backup(reason: str = "manual") -> dict:
+    rows = await _fetch_all_trades()
+    return await _upload_backup(rows, reason)
+
+async def _delete_all_trades():
+    await sb_request(
+        "DELETE",
+        "/rest/v1/trades",
+        params={"id": "not.is.null"},
+        headers={"Prefer": "return=minimal"},
+    )
+
+async def _insert_trade_rows(rows: list[dict]):
+    if not rows:
+        return
+    # Mniejsze paczki są bezpieczniejsze dla PostgREST przy większych journalach.
+    for start in range(0, len(rows), 250):
+        batch = rows[start:start + 250]
+        await sb_request(
+            "POST",
+            "/rest/v1/trades",
+            json=batch,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+        )
+
+async def _read_backup(path: str) -> dict:
+    if not _backup_path_ok(path):
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka backupu.")
+    r = await sb_request("GET", f"/storage/v1/object/{STORAGE_BUCKET}/{path}")
+    try:
+        data = json.loads(r.content.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Backup jest uszkodzony lub nie jest plikiem JSON.") from exc
+    if data.get("format") != "tomasz-trading-journal-backup" or not isinstance(data.get("trades"), list):
+        raise HTTPException(status_code=400, detail="Nieobsługiwany format backupu.")
+    return data
 
 def _csv_bool(value: str, default: bool = True) -> bool:
     if value is None:
@@ -434,6 +516,106 @@ async def import_csv(
         "imported": len(payloads),
         "skipped": skipped,
         "net_total_imported": round(sum(float(x["pnl"]) for x in payloads), 2),
+    }
+
+@app.get("/api/backups/{key:path}")
+async def list_backups(key: str):
+    check_key(key)
+    r = await sb_request(
+        "POST",
+        f"/storage/v1/object/list/{STORAGE_BUCKET}",
+        json={
+            "prefix": BACKUP_PREFIX,
+            "limit": 100,
+            "offset": 0,
+            "sortBy": {"column": "created_at", "order": "desc"},
+        },
+        headers={"Content-Type": "application/json"},
+    )
+    items = []
+    for obj in r.json() if isinstance(r.json(), list) else []:
+        name = str(obj.get("name") or "")
+        if not name.endswith(".json"):
+            continue
+        path = name if name.startswith(BACKUP_PREFIX + "/") else f"{BACKUP_PREFIX}/{name}"
+        match = re.search(r"_(\d+)entries_", name)
+        metadata = obj.get("metadata") or {}
+        items.append({
+            "path": path,
+            "name": name.split("/")[-1],
+            "created_at": obj.get("created_at") or obj.get("updated_at"),
+            "entry_count": int(match.group(1)) if match else None,
+            "size": metadata.get("size"),
+        })
+    return {"items": items}
+
+@app.post("/api/backups/{key:path}/create")
+async def create_backup(key: str):
+    check_key(key)
+    info = await _create_journal_backup("manual")
+    return {"ok": True, "backup": info}
+
+@app.get("/api/backups/{key:path}/download")
+async def download_backup(key: str, path: str = Query(...)):
+    check_key(key)
+    if not _backup_path_ok(path):
+        raise HTTPException(status_code=400, detail="Nieprawidłowa ścieżka backupu.")
+    r = await sb_request("GET", f"/storage/v1/object/{STORAGE_BUCKET}/{path}")
+    filename = path.rsplit("/", 1)[-1]
+    return Response(
+        content=r.content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@app.post("/api/journal-reset/{key:path}")
+async def reset_journal(key: str, confirmation: str = Form(...)):
+    check_key(key)
+    if str(confirmation or "").strip().upper() != "RESET":
+        raise HTTPException(status_code=400, detail="Reset wymaga potwierdzenia RESET.")
+
+    # Najpierw pełny snapshot. Jeżeli jego zapis się nie powiedzie, funkcja rzuci
+    # błąd i żaden rekord nie zostanie usunięty.
+    rows = await _fetch_all_trades()
+    backup = await _upload_backup(rows, "reset")
+    await _delete_all_trades()
+    return {"ok": True, "deleted": len(rows), "backup": backup}
+
+@app.post("/api/backups/{key:path}/restore")
+async def restore_backup(
+    key: str,
+    path: str = Form(...),
+    confirmation: str = Form(...),
+):
+    check_key(key)
+    if str(confirmation or "").strip().upper() != "RESTORE":
+        raise HTTPException(status_code=400, detail="Przywrócenie wymaga potwierdzenia RESTORE.")
+
+    target = await _read_backup(path)
+    target_rows = target.get("trades") or []
+
+    # Backup stanu bieżącego wykonywany automatycznie także przed restore.
+    current_rows = await _fetch_all_trades()
+    safety_backup = await _upload_backup(current_rows, "pre-restore")
+
+    await _delete_all_trades()
+    try:
+        await _insert_trade_rows(target_rows)
+    except Exception:
+        # Best-effort rollback do stanu sprzed restore. Kopia JSON pozostaje
+        # niezależnie od wyniku tej próby.
+        try:
+            await _delete_all_trades()
+            await _insert_trade_rows(current_rows)
+        except Exception:
+            pass
+        raise
+
+    return {
+        "ok": True,
+        "restored": len(target_rows),
+        "source_backup": path,
+        "safety_backup": safety_backup,
     }
 
 @app.get("/api/analytics/{key:path}")
@@ -849,15 +1031,17 @@ JOURNAL_HTML = r"""
 dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radius:15px;background:#0f151c;color:var(--text)}dialog::backdrop{background:rgba(0,0,0,.68)}.modal-head,.modal-foot{padding:14px 16px;display:flex;align-items:center;border-bottom:1px solid var(--line)}.modal-foot{border-top:1px solid var(--line);border-bottom:0;justify-content:flex-end;gap:8px}
 .quick-grid{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:11px}.full{grid-column:1/-1}label{display:block;font-size:10px;color:var(--muted);font-weight:750;margin-bottom:5px}textarea{min-height:95px;resize:vertical}
 .details{grid-column:1/-1;border:1px solid var(--line);border-radius:11px;background:#0c131a}.details summary{cursor:pointer;padding:11px 12px;font-size:12px;font-weight:800;color:#c8d3dd}.details .form-grid{padding:0 12px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px}.preview{max-width:100%;max-height:250px;border-radius:10px;border:1px solid var(--line);display:none}.import-wrap{padding:16px}.import-controls{display:grid;grid-template-columns:1fr 180px;gap:10px;align-items:end}.import-options{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0;color:#c7d0d9;font-size:12px}.import-options label{display:flex;align-items:center;gap:7px;margin:0;font-size:12px}.import-options input{width:auto}.import-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.import-kpi{background:#0c131a;border:1px solid var(--line);border-radius:10px;padding:10px}.import-kpi .k{font-size:10px;color:var(--muted)}.import-kpi .v{font-weight:850;margin-top:4px}.import-table-wrap{max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:10px}.import-table{width:100%;border-collapse:collapse;font-size:11px}.import-table th,.import-table td{padding:8px;border-bottom:1px solid #202c38;text-align:left;white-space:nowrap}.import-table th{position:sticky;top:0;background:#151f29;z-index:1}.dup{opacity:.48}.import-errors{color:#ffaaaa;font-size:12px;white-space:pre-wrap;margin-top:10px}.hint{font-size:11px;color:var(--muted);line-height:1.45}
+.btn.danger{background:#3a171a;border-color:#6f2a31;color:#ffc0c5}.btn.danger:hover{background:#521e23}.backup-wrap{padding:16px}.backup-actions{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin-bottom:14px}.backup-warning{background:#28161a;border:1px solid #653039;color:#ffc5ca;padding:12px;border-radius:11px;line-height:1.45;font-size:12px;margin:12px 0}.backup-list{display:flex;flex-direction:column;gap:8px;max-height:390px;overflow:auto}.backup-row{display:grid;grid-template-columns:1fr auto auto auto;gap:8px;align-items:center;background:#0c131a;border:1px solid var(--line);border-radius:10px;padding:10px}.backup-name{font-size:12px;font-weight:800;overflow:hidden;text-overflow:ellipsis}.backup-meta{font-size:10px;color:var(--muted);margin-top:3px}.backup-empty{color:var(--muted);font-size:12px;padding:22px;text-align:center;border:1px dashed var(--line);border-radius:10px}
 @media(max-width:900px){.stats{grid-template-columns:repeat(3,1fr)}.filters{grid-template-columns:1fr 1fr 1fr}.filters input{grid-column:1/-1}.analytics{grid-template-columns:1fr}.breakdown{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(4,1fr)}}
-@media(max-width:700px){.import-controls{grid-template-columns:1fr}.import-summary{grid-template-columns:1fr 1fr}.header-row{padding:12px}.brand{font-size:19px}.tabs{padding:0 12px 10px}.filters{padding:10px 12px;grid-template-columns:1fr 1fr}.stats{padding:12px;grid-template-columns:1fr 1fr}.analytics,.breakdown,.daily,.feed{padding-left:12px;padding-right:12px}.card-body{grid-template-columns:1fr}.quick-grid{grid-template-columns:1fr}.full{grid-column:auto}.details{grid-column:auto}.details .form-grid{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:700px){.backup-row{grid-template-columns:1fr 1fr}.backup-row>div:first-child{grid-column:1/-1}.import-controls{grid-template-columns:1fr}.import-summary{grid-template-columns:1fr 1fr}.header-row{padding:12px}.brand{font-size:19px}.tabs{padding:0 12px 10px}.filters{padding:10px 12px;grid-template-columns:1fr 1fr}.stats{padding:12px;grid-template-columns:1fr 1fr}.analytics,.breakdown,.daily,.feed{padding-left:12px;padding-right:12px}.card-body{grid-template-columns:1fr}.quick-grid{grid-template-columns:1fr}.full{grid-column:auto}.details{grid-column:auto}.details .form-grid{grid-template-columns:1fr}.day-list{grid-template-columns:repeat(3,1fr)}}
 </style>
 </head>
 <body>
 <div class="app">
 <header class="header">
  <div class="header-row">
-  <div><div class="brand">Trading Journal v2.7</div><div class="sub">Feed · R-multiple · punkty · PnL · setupy · import CSV</div></div><div class="spacer"></div>
+  <div><div class="brand">Trading Journal v2.8</div><div class="sub">Feed · R-multiple · punkty · PnL · setupy · import CSV · backup</div></div><div class="spacer"></div>
+  <button class="btn" onclick="openBackups()">Backupy / Reset</button>
   <button class="btn" onclick="openImport()">Import CSV</button>
   <button class="btn primary" onclick="openNew()">+ Dodaj wpis</button>
  </div>
@@ -950,8 +1134,24 @@ dialog{width:min(760px,95vw);padding:0;border:1px solid var(--line);border-radiu
  <div class="modal-foot"><button class="btn" onclick="importDlg.close()">Anuluj</button><button class="btn primary" id="doImportBtn" onclick="doImportCsv()" disabled>Importuj transakcje</button></div>
 </dialog>
 
+<dialog id="backupDlg" style="width:min(900px,96vw)">
+ <div class="modal-head"><strong>Backupy i reset journala</strong><div class="spacer"></div><button class="btn" onclick="backupDlg.close()">Zamknij</button></div>
+ <div class="backup-wrap">
+  <div class="backup-actions">
+   <button class="btn" onclick="createManualBackup()">Utwórz backup teraz</button>
+   <button class="btn" onclick="loadBackups()">Odśwież listę</button>
+   <div class="spacer"></div>
+   <button class="btn danger" onclick="resetJournal()">Reset Journal</button>
+  </div>
+  <div class="hint">Backup zawiera wszystkie wpisy i ścieżki do screenshotów. Screenshoty pozostają w Supabase Storage. Restore zastępuje bieżący journal zawartością wybranego backupu, a przed przywróceniem automatycznie tworzy dodatkową kopię bezpieczeństwa.</div>
+  <div class="backup-warning"><b>Reset Journal</b> najpierw automatycznie zapisuje pełny backup JSON. Dopiero po udanym zapisie usuwa wszystkie wpisy z tabeli trades. Jeśli backup się nie uda, reset nie nastąpi.</div>
+  <div id="backupStatus" class="hint" style="margin:8px 0"></div>
+  <div id="backupList" class="backup-list"><div class="backup-empty">Ładowanie backupów...</div></div>
+ </div>
+</dialog>
+
 <script>
-const key=__SAFE_KEY__,dlg=document.getElementById('dlg'),importDlg=document.getElementById('importDlg');let editingId=null,currentPeriod='today',lastImportPreview=null,lastEquityPoints=[];
+const key=__SAFE_KEY__,dlg=document.getElementById('dlg'),importDlg=document.getElementById('importDlg'),backupDlg=document.getElementById('backupDlg');let editingId=null,currentPeriod='today',lastImportPreview=null,lastEquityPoints=[];
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const money=v=>{const n=Number(v)||0;return(n>=0?'+':'-')+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
 function nowLocal(){const d=new Date(),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}function isoFromLocal(v){return v?new Date(v).toISOString():new Date().toISOString()}function localInputFromIso(v){if(!v)return nowLocal();const d=new Date(v),o=d.getTimezoneOffset();return new Date(d.getTime()-o*60000).toISOString().slice(0,16)}
@@ -1037,6 +1237,43 @@ function importFd(){const f=$('csvFile').files[0];if(!f){alert('Wybierz plik CSV
 function fmtDt(v){return new Date(v).toLocaleString('pl-PL',{timeZone:'Europe/London',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
 async function previewCsv(){const fd=importFd();if(!fd)return;$('doImportBtn').disabled=true;const r=await fetch(`/api/import-csv-preview/${encodeURIComponent(key)}`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}if(!r.ok){alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}lastImportPreview=d;$('importSummary').style.display='block';$('impCount').textContent=d.count;$('impPnl').textContent=money(d.pnl_total);$('impPnl').className='v '+(d.pnl_total>0?'pos':d.pnl_total<0?'neg':'');$('dupInfo').textContent=d.duplicates?`${d.duplicates} z ${d.count} wygląda na już istniejące. Przy włączonym „Pomijaj duplikaty” zostaną pominięte.`:`Nie wykryto duplikatów. Do importu: ${d.new_count}.`;$('importRows').innerHTML=d.items.map((t,i)=>`<tr class="${t.duplicate?'dup':''}"><td>${i+1}${t.duplicate?' · DUP':''}</td><td>${esc(fmtDt(t.trade_time))}</td><td>${esc(fmtDt(t.exit_time))}</td><td>${esc(t.instrument)}</td><td>${esc(t.side)}</td><td>${esc(t.qty)}</td><td>${esc(t.entry)}</td><td>${esc(t.exit)}</td><td class="${t.pnl>0?'pos':t.pnl<0?'neg':''}">${money(t.pnl)}</td></tr>`).join('');$('importErrors').textContent=(d.errors||[]).join('\n');$('doImportBtn').disabled=!!(d.errors||[]).length||!d.count}
 async function doImportCsv(){if(!lastImportPreview){alert('Najpierw kliknij „Sprawdź plik”.');return}const fd=importFd();if(!fd)return;fd.append('skip_duplicates',$('csvSkipDup').checked?'true':'false');$('doImportBtn').disabled=true;const r=await fetch(`/api/import-csv/${encodeURIComponent(key)}`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}if(!r.ok){$('doImportBtn').disabled=false;alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}importDlg.close();await loadOptions();await refresh();alert(`Zaimportowano: ${d.imported}\nPominięto duplikatów: ${d.skipped}\nPnL netto zaimportowanych: ${money(d.net_total_imported)}`)}
+function openBackups(){backupDlg.showModal();loadBackups()}
+function backupDate(v){if(!v)return '—';try{return new Date(v).toLocaleString('pl-PL',{timeZone:'Europe/London',dateStyle:'medium',timeStyle:'short'})}catch{return String(v)}}
+function backupSize(v){const n=Number(v);if(!Number.isFinite(n))return '';if(n<1024)return n+' B';if(n<1024*1024)return (n/1024).toFixed(1)+' KB';return (n/1024/1024).toFixed(1)+' MB'}
+async function loadBackups(){
+ $('backupStatus').textContent='Ładowanie...';
+ const r=await fetch(`/api/backups/${encodeURIComponent(key)}`,{cache:'no-store'});let d;try{d=await r.json()}catch{d={detail:await r.text()}}
+ if(!r.ok){$('backupStatus').textContent='Błąd: '+(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}
+ $('backupStatus').textContent=`Backupów: ${(d.items||[]).length}`;
+ if(!(d.items||[]).length){$('backupList').innerHTML='<div class="backup-empty">Nie ma jeszcze żadnych backupów.</div>';return}
+ $('backupList').innerHTML=d.items.map(b=>`<div class="backup-row"><div><div class="backup-name">${esc(b.name)}</div><div class="backup-meta">${esc(backupDate(b.created_at))}${b.entry_count!=null?' · '+esc(b.entry_count)+' wpisów':''}${b.size?' · '+esc(backupSize(b.size)):''}</div></div><button class="btn" onclick='downloadBackup(${JSON.stringify(b.path)})'>Pobierz</button><button class="btn" onclick='restoreBackup(${JSON.stringify(b.path)},${JSON.stringify(b.name)})'>Przywróć</button><span></span></div>`).join('');
+}
+async function createManualBackup(){
+ $('backupStatus').textContent='Tworzę backup...';
+ const r=await fetch(`/api/backups/${encodeURIComponent(key)}/create`,{method:'POST'});let d;try{d=await r.json()}catch{d={detail:await r.text()}}
+ if(!r.ok){$('backupStatus').textContent='Błąd backupu.';alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}
+ $('backupStatus').textContent=`Backup utworzony: ${d.backup.entry_count} wpisów.`;await loadBackups();
+}
+function downloadBackup(path){window.location.href=`/api/backups/${encodeURIComponent(key)}/download?path=${encodeURIComponent(path)}`}
+async function resetJournal(){
+ const typed=prompt('To usunie WSZYSTKIE wpisy z bieżącego journala po utworzeniu automatycznego backupu.\n\nAby kontynuować wpisz: RESET');
+ if(typed!=='RESET')return;
+ $('backupStatus').textContent='Tworzę backup i resetuję journal...';
+ const fd=new FormData();fd.append('confirmation','RESET');
+ const r=await fetch(`/api/journal-reset/${encodeURIComponent(key)}`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}
+ if(!r.ok){$('backupStatus').textContent='Reset NIE został wykonany.';alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}
+ $('backupStatus').textContent=`Reset gotowy. Usunięto ${d.deleted} wpisów. Backup zapisany.`;await loadOptions();await refresh();await loadBackups();alert(`Journal zresetowany.\nUsunięto wpisów: ${d.deleted}\nBackup: ${d.backup.filename}`);
+}
+async function restoreBackup(path,name){
+ if(!confirm(`Przywrócić backup „${name}”?\n\nBieżący journal zostanie najpierw automatycznie zbackupowany, a następnie zastąpiony zawartością tej kopii.`))return;
+ const typed=prompt('Aby potwierdzić przywrócenie wpisz: RESTORE');if(typed!=='RESTORE')return;
+ $('backupStatus').textContent='Tworzę backup bezpieczeństwa i przywracam...';
+ const fd=new FormData();fd.append('path',path);fd.append('confirmation','RESTORE');
+ const r=await fetch(`/api/backups/${encodeURIComponent(key)}/restore`,{method:'POST',body:fd});let d;try{d=await r.json()}catch{d={detail:await r.text()}}
+ if(!r.ok){$('backupStatus').textContent='Przywrócenie nie powiodło się.';alert(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));return}
+ $('backupStatus').textContent=`Przywrócono ${d.restored} wpisów.`;await loadOptions();await refresh();await loadBackups();alert(`Przywrócono ${d.restored} wpisów.\nPrzed restore utworzono dodatkowy backup bezpieczeństwa.`);
+}
+
 async function deleteCurrent(){if(!editingId||!confirm('Usunąć ten wpis?'))return;const r=await fetch(`/api/trades/${encodeURIComponent(key)}?trade_id=${encodeURIComponent(editingId)}`,{method:'DELETE'});if(!r.ok){alert(await r.text());return}dlg.close();await loadOptions();await refresh()}
 ['search','typeFilter','instrumentFilter','sideFilter','setupFilter','tagFilter'].forEach(id=>$(id).addEventListener(id==='search'?'input':'change',loadFeed));window.addEventListener('resize',()=>drawEquity(lastEquityPoints));
 (async()=>{await loadOptions();await refresh();setInterval(loadFeed,15000)})();
